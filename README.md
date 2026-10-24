@@ -6,7 +6,7 @@ RMCS 工程机器人的能量单元位姿估计组件。它读取 RGB-D 相机�
 
 ## 当前状态
 
-框架已搭好，组件可以被 `rmcs_executor` 加载，但还没有接入检测、配准和跟踪，`/energy_trace/pose_valid` 始终为 `false`。
+检测和点云配准模块已完成，并有离线测试。它们还没有接入组件，`/energy_trace/pose_valid` 始终为 `false`。跟踪和监督尚未实现。
 
 ## 设计
 
@@ -32,11 +32,32 @@ RMCS 工程机器人的能量单元位姿估计组件。它读取 RGB-D 相机�
 
 | 路径 | 内容 |
 |---|---|
-| `src/` | 组件和算法代码 |
+| `src/component.cpp` | 组件，负责接口和调度 |
+| `src/detection/` | YOLO11 检测（OpenVINO，CPU） |
+| `src/pose/` | STL 读取、点云配准、合成深度图渲染 |
+| `test/` | 离线测试，不需要相机 |
+| `tool/` | 离线工具，例如 `energy_unit_detect` |
+| `scripts/` | Python 脚本，例如把 YOLO 权重导出为 OpenVINO 格式 |
 | `config/` | 参数示例 |
 | `models/energy_unit.stl` | 能量单元 3D 模型，单位 mm，原点在外包长方体的一角 |
 
 模型权重和数据集不放进仓库，见 `.gitignore`。
+
+## 测试与工具
+
+配准测试在合成深度图上各运行 20 次。合格标准是中心误差小于 3 mm，且长轴方向误差小于 2°。
+
+```zsh
+/workspaces/RMCS/rmcs_ws/build/rmcs_energy_trace/test_point_cloud_registration
+```
+
+检测工具对一张图片或一个目录中的图片运行检测，并保存画好框的结果：
+
+```zsh
+ros2 run rmcs_energy_trace energy_unit_detect <model.xml> <图片或目录> <输出目录> [--conf 0.25]
+```
+
+`model.xml` 由 `scripts/export_yolo.py` 从 Ultralytics 的 `.pt` 权重导出。
 
 ## 构建
 
