@@ -8,6 +8,7 @@
 
 #include <eigen3/Eigen/Geometry>
 #include <opencv2/core/mat.hpp>
+#include <opencv2/core/matx.hpp>
 #include <opencv2/core/types.hpp>
 
 #include "geometry/camera.hpp"
@@ -16,11 +17,30 @@
 
 namespace rmcs_energy_trace::synthetic {
 
-// 合成深度图渲染器：对模型表面密采样做 z-buffer 投影，可叠加平面并加高斯噪声
+// 合成深度图渲染器：对模型表面密采样做 z-buffer 投影，可叠加平面并加高斯噪声。
+// 配置了 Config::color 时同时输出与深度对齐的彩色图，供基于颜色的跟踪使用
 class DepthRenderer {
     RMCS_PIMPL_DEFINITION(DepthRenderer)
 
 public:
+    // 彩色图的外观，颜色为 BGR
+    struct ColorConfig {
+        // 物体中段和两端（|z| 大于 dark_abs_z，模型系，单位 m）的颜色
+        cv::Vec3b object_light{190, 160, 70};
+        cv::Vec3b object_dark{50, 40, 30};
+        double dark_abs_z = 0.05;
+        // 平面和背景（没有物体也没有平面的像素）的基色
+        cv::Vec3b plane{120, 125, 130};
+        cv::Vec3b background{100, 90, 80};
+        // 平面和背景叠加的平滑纹理：幅度（灰度级）和格子边长 (px)，幅度为 0 表示无纹理
+        float texture_amplitude = 0.f;
+        int texture_cell_px = 24;
+        // 逐像素高斯噪声标准差（灰度级）
+        float noise_sigma = 2.f;
+        // 渲染后的高斯模糊标准差 (px)，模拟边缘不是阶跃，0 表示不模糊
+        float blur_sigma_px = 0.7f;
+    };
+
     struct Config {
         int width = 640;
         int height = 480;
@@ -34,6 +54,8 @@ public:
         double plane_max_range = 3.;
         // ROI 相对物体像素包围盒的外扩比例
         double roi_margin = 0.1;
+        // 非空时输出彩色图；彩色噪声在深度噪声之后抽取，不影响深度图的结果
+        std::optional<ColorConfig> color = std::nullopt;
     };
 
     // 相机系下的平面：normal 为法向量，point 为平面上一点
@@ -45,6 +67,7 @@ public:
     struct Frame {
         cv::Mat depth;  // CV_16UC1, mm, 0 为无效
         cv::Rect2i roi; // 物体投影包围盒外扩
+        cv::Mat color;  // CV_8UC3 BGR，未配置 Config::color 时为空
     };
 
     // 场景中的一个物体：mesh 为 initialize / add_mesh 返回的编号，pose 为模型到相机
@@ -56,6 +79,7 @@ public:
     struct SceneFrame {
         cv::Mat depth;    // CV_16UC1, mm, 0 为无效
         cv::Mat instance; // CV_8UC1, 0 为背景或平面, k 为 objects[k - 1]
+        cv::Mat color;    // CV_8UC3 BGR，未配置 Config::color 时为空
     };
 
     // 初始化并登记第 0 号网格

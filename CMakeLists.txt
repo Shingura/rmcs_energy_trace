@@ -22,6 +22,79 @@ find_package(PCL 1.14 REQUIRED COMPONENTS
   common features filters kdtree registration search sample_consensus segmentation
 )
 
+# ---- M3T（third_party/m3t）----
+find_package(OpenMP REQUIRED)
+find_package(Eigen3 REQUIRED)
+set(M3T_ROOT ${PROJECT_SOURCE_DIR}/third_party/m3t)
+
+# 与 OpenGL 无关的源文件
+set(M3T_CORE_NAMES
+  body camera color_histograms common constraint depth_modality depth_model detector link
+  model modality optimizer publisher refiner region_modality region_model soft_constraint
+  static_detector subscriber tracker viewer
+)
+# 依赖 OpenGL 的渲染器
+set(M3T_RENDERER_NAMES
+  renderer_geometry renderer normal_renderer silhouette_renderer basic_depth_renderer
+)
+list(TRANSFORM M3T_CORE_NAMES PREPEND ${M3T_ROOT}/src/ OUTPUT_VARIABLE M3T_SOURCES)
+list(TRANSFORM M3T_RENDERER_NAMES PREPEND ${M3T_ROOT}/src/ OUTPUT_VARIABLE M3T_RENDERER_SOURCES)
+list(TRANSFORM M3T_SOURCES APPEND .cpp)
+list(TRANSFORM M3T_RENDERER_SOURCES APPEND .cpp)
+list(APPEND M3T_SOURCES ${M3T_RENDERER_SOURCES} ${M3T_ROOT}/stubs/highgui_stubs.cpp)
+
+# 构建一个 M3T 静态库。
+# m3t_runtime 用 stubs/gl 下的占位头文件编译渲染器，不链接 OpenGL / GLEW / GLFW / X11；
+# m3t_full 使用真实的 OpenGL，只用于离线生成区域 / 深度模型。
+# 第三方代码不检查警告，include 目录按 SYSTEM 处理；符号隐藏，两个库可同时出现在一个进程中。
+function(m3t_add_library target)
+  cmake_parse_arguments(ARG "WITH_OPENGL" "" "" ${ARGN})
+  add_library(${target} STATIC ${M3T_SOURCES})
+  target_include_directories(${target} SYSTEM PUBLIC ${M3T_ROOT}/include ${M3T_ROOT}/third_party)
+  if(NOT ARG_WITH_OPENGL)
+    # 头文件 renderer_geometry.h 会包含 GL 头文件，使用方也需要看到占位版本
+    target_include_directories(${target} SYSTEM BEFORE PUBLIC ${M3T_ROOT}/stubs/gl)
+  endif()
+  target_link_libraries(${target} PUBLIC OpenMP::OpenMP_CXX Eigen3::Eigen opencv_core opencv_imgproc opencv_imgcodecs)
+  target_compile_options(${target} PRIVATE -w)
+  set_target_properties(${target} PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON
+    CXX_STANDARD 17
+  )
+endfunction()
+
+m3t_add_library(m3t_runtime)
+
+# 可选：生成 M3T 区域 / 深度模型的离线工具。需要 OpenGL、GLEW 和 X11 开发包，GLFW 从源码构建
+option(RMCS_ENERGY_TRACE_BUILD_M3T_TOOLS
+  "Build m3t_generate, which renders with OpenGL (needs OpenGL, GLEW and a display)" OFF)
+if(RMCS_ENERGY_TRACE_BUILD_M3T_TOOLS)
+  include(FetchContent)
+  set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+  set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+  set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+  set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
+  set(BUILD_SHARED_LIBS_BACKUP ${BUILD_SHARED_LIBS})
+  set(BUILD_SHARED_LIBS OFF)
+  FetchContent_Declare(glfw
+    GIT_REPOSITORY https://github.com/glfw/glfw.git
+    GIT_TAG 7b6aead9fb88b3623e3b3725ebb42670cbe4c579 # 3.4
+  )
+  FetchContent_MakeAvailable(glfw)
+  # 第三方代码不检查警告
+  target_compile_options(glfw PRIVATE -w)
+  set(BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS_BACKUP})
+
+  set(OpenGL_GL_PREFERENCE LEGACY)
+  find_package(OpenGL REQUIRED)
+  find_package(GLEW REQUIRED)
+
+  m3t_add_library(m3t_full WITH_OPENGL)
+  target_link_libraries(m3t_full PUBLIC OpenGL::GL GLEW::GLEW glfw)
+endif()
+
 file(GLOB_RECURSE PROJECT_SOURCE CONFIGURE_DEPENDS
   ${PROJECT_SOURCE_DIR}/src/*.cpp
 )
@@ -36,6 +109,7 @@ target_link_libraries(${PROJECT_NAME}
   ${OpenCV_LIBS}
   openvino::runtime
   ${PCL_LIBRARIES}
+  m3t_runtime
 )
 
 # GCC 14 对 PCL ICP 内部 SVD 估计中的 Eigen 表达式误报 -Warray-bounds
@@ -56,6 +130,22 @@ target_compile_definitions(mask_ablation PRIVATE
   RMCS_ENERGY_UNIT_MESH="${PROJECT_SOURCE_DIR}/meshes/energy_unit.stl"
 )
 install(TARGETS mask_ablation DESTINATION lib/${PROJECT_NAME})
+
+if(RMCS_ENERGY_TRACE_BUILD_M3T_TOOLS)
+  # 不链接 ${PROJECT_NAME}：它含有 m3t_runtime（OpenGL 占位头文件），与 m3t_full 的真实 OpenGL 冲突。
+  # 工具只需要读 mesh 和写 OBJ，直接编译这两个源文件
+  add_executable(m3t_generate
+    tool/m3t_generate.cpp src/geometry/mesh.cpp src/tracking/mesh_obj.cpp
+  )
+  target_include_directories(m3t_generate PRIVATE ${PROJECT_SOURCE_DIR}/src)
+  target_include_directories(m3t_generate SYSTEM PRIVATE ${PCL_INCLUDE_DIRS})
+  target_link_libraries(m3t_generate PRIVATE m3t_full ${PCL_LIBRARIES})
+  target_compile_definitions(m3t_generate PRIVATE
+    RMCS_ENERGY_UNIT_MESH="${PROJECT_SOURCE_DIR}/meshes/energy_unit.stl"
+    RMCS_ENERGY_TRACE_DEFAULT_MODEL_DIR="${PROJECT_SOURCE_DIR}/dataset/m3t"
+  )
+  install(TARGETS m3t_generate DESTINATION lib/${PROJECT_NAME})
+endif()
 
 pluginlib_export_plugin_description_file(rmcs_executor plugins.xml)
 
@@ -108,6 +198,14 @@ if(BUILD_TESTING)
     RMCS_ENERGY_UNIT_MESH="${PROJECT_SOURCE_DIR}/meshes/energy_unit.stl"
   )
   set_tests_properties(test_registration PROPERTIES TIMEOUT 300)
+
+  ament_add_gtest(test_tracking test/tracking.cpp)
+  target_link_libraries(test_tracking ${PROJECT_NAME})
+  target_compile_definitions(test_tracking PRIVATE
+    RMCS_ENERGY_UNIT_MESH="${PROJECT_SOURCE_DIR}/meshes/energy_unit.stl"
+    RMCS_ENERGY_TRACE_MODEL_DIR="${PROJECT_SOURCE_DIR}/dataset/m3t"
+  )
+  set_tests_properties(test_tracking PROPERTIES TIMEOUT 300)
 
   ament_add_gtest(test_depth_mask test/depth_mask.cpp)
   target_link_libraries(test_depth_mask ${PROJECT_NAME})

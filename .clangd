@@ -1,4 +1,6 @@
 # PCL 带入的 -fopenmp 会让 clangd 包含 omp.h，而 Clang 自带的头文件中没有它。
 # 只在 clangd 分析时去掉这个参数，实际编译不受影响。
+# M3T 的头文件无条件包含 <omp.h>，用一个空头文件代替（路径相对于编译目录 build/rmcs_energy_trace）。
 CompileFlags:
   Remove: [-fopenmp]
+  Add: [-isystem../../src/rmcs_energy_trace/third_party/m3t/stubs/clangd]

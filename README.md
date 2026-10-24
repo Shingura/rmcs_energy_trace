@@ -6,7 +6,7 @@ RMCS 工程机器人的能量单元位姿估计组件。它读取 RGB-D 相机�
 
 ## 当前状态
 
-检测和点云配准模块已完成，并有离线测试。它们还没有接入组件，`/energy_trace/pose_valid` 始终为 `false`。跟踪和监督尚未实现。
+检测、点云配准和 M3T 跟踪模块已完成，并有离线测试。它们还没有接入组件，`/energy_trace/pose_valid` 始终为 `false`。监督尚未实现。
 
 ## 设计
 
@@ -36,10 +36,12 @@ RMCS 工程机器人的能量单元位姿估计组件。它读取 RGB-D 相机�
 | `src/detection/` | YOLO11 检测（OpenVINO，CPU） |
 | `src/registration/` | 点云配准：深度图转点云、FPFH 粗配准、ICP 精配准 |
 | `src/geometry/` | 公共的几何类型：STL 网格读取与表面采样、相机内参 |
-| `src/synthetic/` | 合成深度图渲染，只供测试和离线工具使用 |
+| `src/tracking/` | M3T 跟踪器，以及把 mesh 写成 OBJ 的辅助函数 |
+| `src/synthetic/` | 合成深度图和彩色图渲染，只供测试和离线工具使用 |
 | `src/utility/` | 通用辅助代码 |
 | `test/` | 离线测试，不需要相机 |
-| `tool/` | 离线工具，例如 `energy_unit_detect`；`tool/grasp_sim/` 是抓取仿真 |
+| `third_party/m3t/` | 随仓库带入的 M3T 源码，说明见其中的 `README.md` |
+| `tool/` | 离线工具，例如 `energy_unit_detect`、`m3t_generate`（生成 M3T 模型文件）；`tool/grasp_sim/` 是抓取仿真 |
 | `scripts/` | Python 脚本，例如把 YOLO 权重导出为 OpenVINO 格式 |
 | `config/` | 参数示例 |
 | `launch/`、`rviz/` | 抓取仿真的启动文件和 RViz 配置 |
@@ -72,6 +74,25 @@ ros2 run rmcs_energy_trace mask_ablation [--trials 40] [--seed 2025] [--mesh <en
 输出每次试验的误差和汇总表（成功率、中心和轴向误差的中位数与最大值、无结果次数、耗时）。结果来自合成数据，没有真实传感器的噪声和边缘伪影，只能作为参考。
 
 `registration::Registration::depth_to_cloud` 有带掩码的重载，掩码先按 `Config::mask_erosion_px`（默认 3 px）向内腐蚀。`test_depth_mask` 是它的单元测试。
+
+## 跟踪（M3T）
+
+`tracking::Tracker` 用 [M3T](https://github.com/DLR-RM/3DObjectTracking) 跟踪位姿。它从上一帧的位姿出发，同时用彩色图的区域线索和深度图的深度线索，每帧约 0.6 ms（单线程，Ryzen 9600X）。只用深度线索约 0.15 ms。
+
+M3T 需要三个预先生成的文件：`energy_unit.obj`、区域模型和深度模型，放在 `dataset/m3t/`。生成时要渲染，需要 OpenGL 和一个显示，所以生成工具默认不构建：
+
+```zsh
+colcon build --packages-select rmcs_energy_trace --cmake-args -DRMCS_ENERGY_TRACE_BUILD_M3T_TOOLS=ON
+env -u WAYLAND_DISPLAY DISPLAY=:0 /workspaces/RMCS/rmcs_ws/build/rmcs_energy_trace/m3t_generate
+```
+
+默认参数下约 20 s，两个模型文件共约 150 MB。参数见 `m3t_generate --help` 的用法提示：`--mesh`、`--out`、`--sphere-radius`、`--n-divides`、`--n-points`、`--image-size`。运行时 `Tracker::Config::model_params` 必须与生成时一致。
+
+文件里记录了 OBJ 的路径，移动目录后要重新生成。
+
+运行时不需要 OpenGL。库里的 M3T（`m3t_runtime`）用占位头文件编译渲染器，不链接 libGL、GLEW、GLFW，也不会初始化 GL，没有显示的环境也能运行。M3T 的源码在 `third_party/m3t/`，删减内容和本地修改见其中的 `README.md`。
+
+`test_tracking` 在合成的彩色加深度序列上测试（150 帧，每帧最多移动 5 mm、转动 2°，直立在地面上和无支撑两种）。合格标准是中心误差不超过 10 mm，中位数小于 2 mm，长轴误差中位数小于 1°。找不到模型文件时测试会跳过。
 
 ## 抓取仿真
 
