@@ -59,6 +59,16 @@ ros2 run rmcs_energy_trace energy_unit_detect <model.xml> <图片或目录> <输
 
 `model.xml` 由 `scripts/export_yolo.py` 从 Ultralytics 的 `.pt` 权重导出。
 
+掩码消融工具在合成深度图上比较点云配准只用检测框和再加实例掩码的效果。场景与测试 B 相同，并在目标旁放 1 到 2 个相邻的能量单元（间距 5、20 或 50 mm，直立或平躺，部分试验挡在目标前面）。每帧运行 3 种输入：只用框、框加精确掩码、框加模拟 YOLO-seg 的退化掩码，另有一组无相邻单元的对照。默认 40 次试验，每次约 3 s。
+
+```zsh
+ros2 run rmcs_energy_trace mask_ablation [--trials 40] [--seed 2025]
+```
+
+输出每次试验的误差和汇总表（成功率、中心和轴向误差的中位数与最大值、无结果次数、耗时）。结果来自合成数据，没有真实传感器的噪声和边缘伪影，只能作为参考。
+
+配准的 `depth_to_cloud` 有带掩码的重载，掩码先按 `Config::mask_erosion_px`（默认 3 px）向内腐蚀。`test_depth_mask` 是它的单元测试。
+
 ## 构建
 
 在 RMCS 工作区中：

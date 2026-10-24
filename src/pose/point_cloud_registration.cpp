@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <memory>
 
+#include <opencv2/imgproc.hpp>
+
 #include "pose/mesh_model.hpp"
 
 #include <pcl/ModelCoefficients.h>
@@ -308,16 +310,44 @@ struct PointCloudRegistration::Impl {
 
 PointCloudRegistration::Cloud::Ptr PointCloudRegistration::depth_to_cloud(
     const cv::Mat& depth, const Intrinsics& intrinsics, const cv::Rect2i& roi) noexcept {
+    return depth_to_cloud(depth, intrinsics, roi, cv::Mat{}, Config{});
+}
+
+PointCloudRegistration::Cloud::Ptr PointCloudRegistration::depth_to_cloud(
+    const cv::Mat& depth, const Intrinsics& intrinsics, const cv::Rect2i& roi,
+    const cv::Mat& mask) noexcept {
+    return depth_to_cloud(depth, intrinsics, roi, mask, Config{});
+}
+
+PointCloudRegistration::Cloud::Ptr PointCloudRegistration::depth_to_cloud(
+    const cv::Mat& depth, const Intrinsics& intrinsics, const cv::Rect2i& roi, const cv::Mat& mask,
+    const Config& config) noexcept {
     auto cloud = std::make_shared<Cloud>();
     if (depth.type() != CV_16UC1)
         return cloud;
+
+    auto eroded = cv::Mat{};
+    if (!mask.empty()) {
+        if (mask.type() != CV_8UC1 || mask.size() != depth.size())
+            return cloud;
+        if (config.mask_erosion_px > 0) {
+            const auto size = 2 * config.mask_erosion_px + 1;
+            cv::erode(
+                mask, eroded, cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size{size, size}));
+        } else {
+            eroded = mask;
+        }
+    }
 
     const auto rect = roi & cv::Rect2i{0, 0, depth.cols, depth.rows};
     cloud->reserve(static_cast<std::size_t>(rect.area()));
     for (int v = rect.y; v < rect.y + rect.height; v++) {
         const auto* row = depth.ptr<std::uint16_t>(v);
+        const auto* mask_row = eroded.empty() ? nullptr : eroded.ptr<std::uint8_t>(v);
         for (int u = rect.x; u < rect.x + rect.width; u++) {
             if (row[u] == 0)
+                continue;
+            if (mask_row != nullptr && mask_row[u] == 0)
                 continue;
             const auto z = static_cast<double>(row[u]) * 1e-3;
             cloud->emplace_back(

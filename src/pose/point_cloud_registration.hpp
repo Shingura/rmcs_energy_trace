@@ -23,6 +23,9 @@ public:
     using Cloud = pcl::PointCloud<pcl::PointXYZ>;
 
     struct Config {
+        // 掩码内缩像素数：使用掩码反投影前先向内腐蚀，去掉边界上的混合深度
+        int mask_erosion_px = 3;
+
         // 模型
         std::size_t model_sample_count = 200000;
         float model_voxel_size = 0.004f;
@@ -81,6 +84,17 @@ public:
     // 深度图 (CV_16UC1, mm, 0 为无效) 在 roi 内反投影为相机系点云 (m, x 右 y 下 z 前)
     static Cloud::Ptr depth_to_cloud(
         const cv::Mat& depth, const Intrinsics& intrinsics, const cv::Rect2i& roi) noexcept;
+
+    // 同上，并只保留掩码 (CV_8UC1，与深度图同尺寸，非 0 保留) 内的像素，
+    // 掩码先按 config.mask_erosion_px 内缩。掩码为空时与不带掩码的版本一致，
+    // 类型或尺寸不符时返回空点云
+    static Cloud::Ptr depth_to_cloud(
+        const cv::Mat& depth, const Intrinsics& intrinsics, const cv::Rect2i& roi,
+        const cv::Mat& mask, const Config& config) noexcept;
+    // 使用默认的 Config
+    static Cloud::Ptr depth_to_cloud(
+        const cv::Mat& depth, const Intrinsics& intrinsics, const cv::Rect2i& roi,
+        const cv::Mat& mask) noexcept;
 
     std::expected<void, std::string>
         initialize(const std::string& stl_path, const Config& config) noexcept;

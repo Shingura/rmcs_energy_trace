@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <optional>
 #include <random>
+#include <vector>
 
 #include <eigen3/Eigen/Geometry>
 #include <opencv2/core/mat.hpp>
@@ -46,11 +47,31 @@ public:
         cv::Rect2i roi; // 物体投影包围盒外扩
     };
 
+    // 场景中的一个物体：mesh 为 initialize / add_mesh 返回的编号，pose 为模型到相机
+    struct Object {
+        std::size_t mesh;
+        Eigen::Isometry3d pose;
+    };
+
+    struct SceneFrame {
+        cv::Mat depth;    // CV_16UC1, mm, 0 为无效
+        cv::Mat instance; // CV_8UC1, 0 为背景或平面, k 为 objects[k - 1]
+    };
+
+    // 初始化并登记第 0 号网格
     void initialize(const Mesh& mesh, const Config& config) noexcept;
+
+    // 追加登记一个网格，返回其编号
+    std::size_t add_mesh(const Mesh& mesh) noexcept;
 
     // pose 为模型到相机，plane 非空时同时渲染该平面
     Frame render(
         const Eigen::Isometry3d& pose, std::mt19937& engine,
+        const std::optional<Plane>& plane) const noexcept;
+
+    // 渲染多个物体（互相遮挡）及可选平面，同时输出实例编号图，最多 255 个物体
+    SceneFrame render_scene(
+        const std::vector<Object>& objects, std::mt19937& engine,
         const std::optional<Plane>& plane) const noexcept;
 };
 
