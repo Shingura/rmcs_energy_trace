@@ -39,9 +39,10 @@ RMCS 工程机器人的能量单元位姿估计组件。它读取 RGB-D 相机�
 | `src/synthetic/` | 合成深度图渲染，只供测试和离线工具使用 |
 | `src/utility/` | 通用辅助代码 |
 | `test/` | 离线测试，不需要相机 |
-| `tool/` | 离线工具，例如 `energy_unit_detect` |
+| `tool/` | 离线工具，例如 `energy_unit_detect`；`tool/grasp_sim/` 是抓取仿真 |
 | `scripts/` | Python 脚本，例如把 YOLO 权重导出为 OpenVINO 格式 |
 | `config/` | 参数示例 |
+| `launch/`、`rviz/` | 抓取仿真的启动文件和 RViz 配置 |
 | `meshes/energy_unit.stl` | 能量单元 3D 模型，单位 mm，原点在外包长方体的一角 |
 
 模型权重和数据集不放进仓库，见 `.gitignore`。
@@ -71,6 +72,20 @@ ros2 run rmcs_energy_trace mask_ablation [--trials 40] [--seed 2025] [--mesh <en
 输出每次试验的误差和汇总表（成功率、中心和轴向误差的中位数与最大值、无结果次数、耗时）。结果来自合成数据，没有真实传感器的噪声和边缘伪影，只能作为参考。
 
 `registration::Registration::depth_to_cloud` 有带掩码的重载，掩码先按 `Config::mask_erosion_px`（默认 3 px）向内腐蚀。`test_depth_mask` 是它的单元测试。
+
+## 抓取仿真
+
+`grasp_sim` 在没有相机和机械臂的情况下演示整条抓取链路：渲染合成深度图，用点云配准估计能量单元位姿，生成 48 个抓取候选，交给 MoveIt 规划接近、抓取和抬升，最后在 RViz 中回放机械臂运动。只有 `link_6` 允许接触能量单元，`link_5` 不允许。
+
+需要 MoveIt 和 `arm_moveit_config`。构建时找不到 MoveIt 会跳过这个目标。
+
+```zsh
+ros2 launch rmcs_energy_trace grasp_sim.launch.py
+```
+
+常用参数：`use_rviz`（默认 `true`，设为 `false` 则只在终端输出结果）、`object_x` `object_y` `object_z` `object_roll` `object_pitch` `object_yaw`（能量单元位姿）、`playback_speed`、`allow_link_contact`、`keep_alive`、`loop`。其余参数见 `config/grasp_sim.yaml`。没有找到可行抓取时进程退出码为 2。
+
+在容器里显示 RViz 前，需要在宿主机执行 `xhost +SI:localuser:$(whoami)`。
 
 ## 构建
 

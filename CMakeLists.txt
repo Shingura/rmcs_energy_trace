@@ -59,7 +59,45 @@ install(TARGETS mask_ablation DESTINATION lib/${PROJECT_NAME})
 
 pluginlib_export_plugin_description_file(rmcs_executor plugins.xml)
 
-install(DIRECTORY config meshes DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY config meshes launch rviz DESTINATION share/${PROJECT_NAME})
+
+# 可选：抓取运动学仿真（需要 MoveIt，缺失时跳过，不影响其余目标）
+find_package(moveit_ros_planning_interface QUIET)
+find_package(pcl_conversions QUIET)
+find_package(tf2_eigen QUIET)
+find_package(tf2_ros QUIET)
+find_package(sensor_msgs QUIET)
+find_package(shape_msgs QUIET)
+find_package(moveit_msgs QUIET)
+find_package(visualization_msgs QUIET)
+find_package(geometry_msgs QUIET)
+find_package(trajectory_msgs QUIET)
+find_package(ament_index_cpp QUIET)
+if(moveit_ros_planning_interface_FOUND AND pcl_conversions_FOUND AND tf2_eigen_FOUND
+   AND tf2_ros_FOUND AND sensor_msgs_FOUND AND shape_msgs_FOUND AND moveit_msgs_FOUND
+   AND visualization_msgs_FOUND AND geometry_msgs_FOUND AND trajectory_msgs_FOUND
+   AND ament_index_cpp_FOUND)
+  add_executable(grasp_sim tool/grasp_sim/grasp_sim.cpp)
+  target_include_directories(grasp_sim PRIVATE ${PROJECT_SOURCE_DIR}/tool/grasp_sim)
+  target_link_libraries(grasp_sim PRIVATE ${PROJECT_NAME})
+  ament_target_dependencies(grasp_sim PUBLIC
+    moveit_ros_planning_interface
+    pcl_conversions
+    tf2_eigen
+    tf2_ros
+    sensor_msgs
+    shape_msgs
+    moveit_msgs
+    visualization_msgs
+    geometry_msgs
+    trajectory_msgs
+    ament_index_cpp
+    rclcpp
+  )
+  install(TARGETS grasp_sim DESTINATION lib/${PROJECT_NAME})
+else()
+  message(STATUS "MoveIt not found, skip grasp_sim")
+endif()
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)

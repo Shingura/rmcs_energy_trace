@@ -1,0 +1,50 @@
+# 抓取运动学仿真参数 (grasp_sim)，坐标均在 base_link 系，单位 m / rad
+grasp_sim:
+  ros__parameters:
+    # 能量单元 mesh（STL，单位 mm），留空时使用包内的 meshes/energy_unit.stl
+    mesh_path: ""
+
+    # 物体真值：中心位置与姿态，roll = pitch = 0 即长轴竖直
+    object.x: 0.40
+    object.y: 0.0
+    object.z: 0.075
+    object.roll: 0.0
+    object.pitch: 0.0
+    object.yaw: 0.0
+
+    # 桌面 [x, y, 厚度]，中心在物体 xy 下方，桌面顶部为物体最低点
+    table.size: [0.6, 0.8, 0.05]
+
+    # 固定相机 (eye-to-hand)：位置 + 注视点，光学系 x 右 y 下 z 前
+    camera.position: [0.0, 0.0, 0.5]
+    # 注视点缺省为物体中心，需要固定时取消注释
+    # camera.target: [0.40, 0.0, 0.075]
+    camera.width: 640
+    camera.height: 480
+    camera.fx: 600.0
+    camera.fy: 600.0
+    camera.noise_sigma_mm: 1.0
+    seed: 2024
+
+    # 抓取：TCP 偏移在 link_6 系下，预抓取沿 link_6 +z 后退
+    grasp.tcp_offset: [0.0, 0.0, 0.0]
+    grasp.pre_distance: 0.10
+    grasp.lift_distance: 0.10
+    grasp.azimuth_samples: 24
+    grasp.eef_step: 0.005
+    grasp.min_fraction: 0.99
+    grasp.ik_precheck: true
+    # 接近/抬升阶段允许夹爪 link_6 与物体接触 (夹爪包住物体)，手腕 link_5 不允许
+    grasp.allow_link_contact: true
+
+    planning_time: 2.0
+    velocity_scaling: 0.5
+    playback_speed: 1.0
+    # true 时规划完成后不退出，便于在 RViz 中观察
+    keep_alive: false
+    # true 时先等待 RViz 订阅标记话题（最长 60 s），再等 viewer_delay 秒后开始运动
+    wait_for_viewer: false
+    viewer_delay: 3.0
+    # keep_alive 时循环重播：每次结束后等 loop_pause 秒，复位后重新播放
+    loop: false
+    loop_pause: 2.0
