@@ -1,0 +1,18 @@
+# 构建输出
+build/
+install/
+log/
+.cache/
+compile_commands.json
+
+# Python 环境与运行输出
+.venv/
+__pycache__/
+runs/
+
+# 本地数据与模型权重：不进入仓库，按 README 说明下载或导出
+data/
+weights/
+*.pt
+*.onnx
+*.engine

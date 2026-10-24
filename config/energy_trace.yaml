@@ -1,0 +1,12 @@
+# rmcs_energy_trace 组件参数示例。
+# 在 rmcs_bringup 的机器人配置中启用组件时，把下面的内容复制到对应实例名下。
+#
+#   rmcs_executor:
+#     ros__parameters:
+#       components:
+#         - rmcs_energy_trace::EnergyTraceComponent -> energy_trace
+
+energy_trace:
+  ros__parameters:
+    # 能量单元 3D 模型（STL，单位 mm），留空时使用包内的 models/energy_unit.stl
+    model_path: ""

@@ -1,0 +1,5 @@
+<library path="rmcs_energy_trace">
+  <class type="rmcs_energy_trace::EnergyTraceComponent" base_class_type="rmcs_executor::Component">
+    <description>Estimates the 6D pose of the energy unit from RGB-D frames.</description>
+  </class>
+</library>
