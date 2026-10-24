@@ -1,4 +1,4 @@
-#include "pose/depth_renderer.hpp"
+#include "synthetic/depth_renderer.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -7,20 +7,20 @@
 #include <memory>
 #include <vector>
 
-namespace rmcs_energy_trace::pose {
+namespace rmcs_energy_trace::synthetic {
 
 struct DepthRenderer::Impl {
     Config config;
     std::vector<pcl::PointCloud<pcl::PointNormal>::Ptr> dense;
 
-    void initialize(const Mesh& mesh, const Config& new_config) noexcept {
+    void initialize(const geometry::Mesh& mesh, const Config& new_config) noexcept {
         config = new_config;
         dense.clear();
         add_mesh(mesh);
     }
 
-    std::size_t add_mesh(const Mesh& mesh) noexcept {
-        dense.push_back(sample_surface(mesh, config.sample_count, config.seed));
+    std::size_t add_mesh(const geometry::Mesh& mesh) noexcept {
+        dense.push_back(geometry::sample_surface(mesh, config.sample_count, config.seed));
         return dense.size() - 1;
     }
 
@@ -136,11 +136,13 @@ struct DepthRenderer::Impl {
     }
 };
 
-void DepthRenderer::initialize(const Mesh& mesh, const Config& config) noexcept {
+void DepthRenderer::initialize(const geometry::Mesh& mesh, const Config& config) noexcept {
     pimpl_->initialize(mesh, config);
 }
 
-std::size_t DepthRenderer::add_mesh(const Mesh& mesh) noexcept { return pimpl_->add_mesh(mesh); }
+std::size_t DepthRenderer::add_mesh(const geometry::Mesh& mesh) noexcept {
+    return pimpl_->add_mesh(mesh);
+}
 
 DepthRenderer::SceneFrame DepthRenderer::render_scene(
     const std::vector<Object>& objects, std::mt19937& engine,
@@ -159,4 +161,4 @@ DepthRenderer::DepthRenderer() noexcept
 
 DepthRenderer::~DepthRenderer() noexcept = default;
 
-} // namespace rmcs_energy_trace::pose
+} // namespace rmcs_energy_trace::synthetic

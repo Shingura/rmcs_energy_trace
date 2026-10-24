@@ -5,15 +5,17 @@
 #include <gtest/gtest.h>
 #include <opencv2/core.hpp>
 
-#include "pose/point_cloud_registration.hpp"
+#include "geometry/camera.hpp"
+#include "registration/registration.hpp"
 
-using namespace rmcs_energy_trace::pose;
+using rmcs_energy_trace::geometry::CameraIntrinsics;
+using rmcs_energy_trace::registration::Registration;
 
 namespace {
 
 constexpr int kWidth = 64;
 constexpr int kHeight = 48;
-constexpr PointCloudRegistration::Intrinsics kIntrinsics{60., 60., 32., 24.};
+constexpr CameraIntrinsics kIntrinsics{60., 60., 32., 24.};
 const auto kRoi = cv::Rect2i{10, 8, 40, 30};
 
 auto make_depth() -> cv::Mat { return {kHeight, kWidth, CV_16UC1, cv::Scalar{500}}; }
@@ -24,8 +26,8 @@ auto make_mask(const cv::Rect2i& keep) -> cv::Mat {
     return mask;
 }
 
-auto config_with_erosion(int pixels) -> PointCloudRegistration::Config {
-    auto config = PointCloudRegistration::Config{};
+auto config_with_erosion(int pixels) -> Registration::Config {
+    auto config = Registration::Config{};
     config.mask_erosion_px = pixels;
     return config;
 }
@@ -33,13 +35,13 @@ auto config_with_erosion(int pixels) -> PointCloudRegistration::Config {
 } // namespace
 
 TEST(DepthMask, DefaultErosionIsThreePixels) {
-    EXPECT_EQ(PointCloudRegistration::Config{}.mask_erosion_px, 3);
+    EXPECT_EQ(Registration::Config{}.mask_erosion_px, 3);
 }
 
 TEST(DepthMask, FullMaskMatchesBoxOnly) {
     const auto depth = make_depth();
-    const auto box = PointCloudRegistration::depth_to_cloud(depth, kIntrinsics, kRoi);
-    const auto masked = PointCloudRegistration::depth_to_cloud(
+    const auto box = Registration::depth_to_cloud(depth, kIntrinsics, kRoi);
+    const auto masked = Registration::depth_to_cloud(
         depth, kIntrinsics, kRoi, make_mask({0, 0, kWidth, kHeight}), config_with_erosion(0));
 
     ASSERT_EQ(box->size(), static_cast<std::size_t>(kRoi.area()));
@@ -51,7 +53,7 @@ TEST(DepthMask, FullMaskMatchesBoxOnly) {
     }
 
     // 空掩码退化为只用框
-    const auto empty_mask = PointCloudRegistration::depth_to_cloud(depth, kIntrinsics, kRoi, {});
+    const auto empty_mask = Registration::depth_to_cloud(depth, kIntrinsics, kRoi, {});
     EXPECT_EQ(empty_mask->size(), box->size());
 }
 
@@ -59,7 +61,7 @@ TEST(DepthMask, PartialMaskKeepsOnlyMaskedPoints) {
     const auto depth = make_depth();
     // 掩码一部分在 ROI 之外，只有与 ROI 的交集被保留
     const auto keep = cv::Rect2i{30, 12, 34, 10};
-    const auto cloud = PointCloudRegistration::depth_to_cloud(
+    const auto cloud = Registration::depth_to_cloud(
         depth, kIntrinsics, kRoi, make_mask(keep), config_with_erosion(0));
 
     EXPECT_EQ(cloud->size(), static_cast<std::size_t>((keep & kRoi).area()));
@@ -73,7 +75,7 @@ TEST(DepthMask, PartialMaskKeepsOnlyMaskedPoints) {
 TEST(DepthMask, InvalidDepthStaysExcluded) {
     auto depth = make_depth();
     depth(cv::Rect2i{20, 10, 5, 5}).setTo(0);
-    const auto cloud = PointCloudRegistration::depth_to_cloud(
+    const auto cloud = Registration::depth_to_cloud(
         depth, kIntrinsics, kRoi, make_mask({0, 0, kWidth, kHeight}), config_with_erosion(0));
     EXPECT_EQ(cloud->size(), static_cast<std::size_t>(kRoi.area() - 25));
 }
@@ -83,7 +85,7 @@ TEST(DepthMask, ErosionShrinksKeptArea) {
     const auto mask = make_mask({16, 12, 24, 20});
 
     const auto size = [&](int erosion) {
-        return PointCloudRegistration::depth_to_cloud(
+        return Registration::depth_to_cloud(
                    depth, kIntrinsics, kRoi, mask, config_with_erosion(erosion))
             ->size();
     };
@@ -93,16 +95,13 @@ TEST(DepthMask, ErosionShrinksKeptArea) {
     EXPECT_LT(size(3), size(1));
 
     // 不带 Config 的重载使用默认的 3 px
-    EXPECT_EQ(
-        PointCloudRegistration::depth_to_cloud(depth, kIntrinsics, kRoi, mask)->size(), 18U * 14U);
+    EXPECT_EQ(Registration::depth_to_cloud(depth, kIntrinsics, kRoi, mask)->size(), 18U * 14U);
 }
 
 TEST(DepthMask, MismatchedMaskGivesEmptyCloud) {
     const auto depth = make_depth();
     const auto wrong_size = cv::Mat(kHeight / 2, kWidth / 2, CV_8UC1, cv::Scalar{255});
-    EXPECT_TRUE(
-        PointCloudRegistration::depth_to_cloud(depth, kIntrinsics, kRoi, wrong_size)->empty());
+    EXPECT_TRUE(Registration::depth_to_cloud(depth, kIntrinsics, kRoi, wrong_size)->empty());
     const auto wrong_type = cv::Mat(kHeight, kWidth, CV_8UC3, cv::Scalar::all(255));
-    EXPECT_TRUE(
-        PointCloudRegistration::depth_to_cloud(depth, kIntrinsics, kRoi, wrong_type)->empty());
+    EXPECT_TRUE(Registration::depth_to_cloud(depth, kIntrinsics, kRoi, wrong_type)->empty());
 }

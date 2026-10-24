@@ -11,7 +11,7 @@
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 
-namespace rmcs_energy_trace::pose {
+namespace rmcs_energy_trace::geometry {
 
 struct Mesh {
     using Triangle = std::array<Eigen::Vector3f, 3>;
@@ -30,4 +30,4 @@ std::expected<Mesh, std::string> load_binary_stl(const std::string& path) noexce
 pcl::PointCloud<pcl::PointNormal>::Ptr
     sample_surface(const Mesh& mesh, std::size_t count, std::uint32_t seed) noexcept;
 
-} // namespace rmcs_energy_trace::pose
+} // namespace rmcs_energy_trace::geometry

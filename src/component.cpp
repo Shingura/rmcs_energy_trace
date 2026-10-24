@@ -20,9 +20,9 @@ public:
         register_output("/energy_trace/pose_valid", pose_valid_, false);
         register_output("/energy_trace/pose", pose_, Eigen::Isometry3d::Identity());
 
-        model_path_ = get_parameter_or<std::string>("model_path", "");
+        mesh_path_ = get_parameter_or<std::string>("mesh_path", "");
         RCLCPP_INFO(
-            get_logger(), "energy trace component created, model_path='%s'", model_path_.c_str());
+            get_logger(), "energy trace component created, mesh_path='%s'", mesh_path_.c_str());
     }
 
     void update() override {
@@ -34,7 +34,7 @@ private:
     OutputInterface<bool> pose_valid_;
     OutputInterface<Eigen::Isometry3d> pose_;
 
-    std::string model_path_;
+    std::string mesh_path_;
 };
 
 } // namespace rmcs_energy_trace

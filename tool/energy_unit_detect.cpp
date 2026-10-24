@@ -10,13 +10,13 @@
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
-#include "detection/energy_unit_detection.hpp"
+#include "detection/detector.hpp"
 
 namespace fs = std::filesystem;
 
 auto main(int argc, char* argv[]) -> int {
     auto positional = std::vector<std::string>{};
-    auto config = rmcs_energy_trace::detection::EnergyUnitDetection::Config{};
+    auto config = rmcs_energy_trace::detection::Detector::Config{};
     auto json_path = std::string{};
 
     for (int i = 1; i < argc; i++) {
@@ -35,12 +35,12 @@ auto main(int argc, char* argv[]) -> int {
     }
     if (positional.size() != 3) {
         std::println(
-            "Usage: energy_unit_detect <model.xml> <image_or_dir> <out_dir> [--conf 0.25] "
+            "Usage: energy_unit_detect <network.xml> <image_or_dir> <out_dir> [--conf 0.25] "
             "[--iou 0.7] [--device CPU] [--json out.json]");
         return EXIT_FAILURE;
     }
 
-    config.model_location = positional[0];
+    config.network_path = positional[0];
     const auto input = fs::path{positional[1]};
     const auto out_dir = fs::path{positional[2]};
 
@@ -57,7 +57,7 @@ auto main(int argc, char* argv[]) -> int {
     }
     fs::create_directories(out_dir);
 
-    auto detector = rmcs_energy_trace::detection::EnergyUnitDetection{};
+    auto detector = rmcs_energy_trace::detection::Detector{};
     if (auto result = detector.initialize(config); !result.has_value()) {
         std::println("{}", result.error());
         return EXIT_FAILURE;

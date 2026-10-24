@@ -11,12 +11,12 @@
 
 namespace rmcs_energy_trace::detection {
 
-class EnergyUnitDetection {
-    RMCS_PIMPL_DEFINITION(EnergyUnitDetection)
+class Detector {
+    RMCS_PIMPL_DEFINITION(Detector)
 
 public:
     struct Config {
-        std::string model_location;
+        std::string network_path;
         std::string infer_device = "CPU";
 
         float score_threshold = 0.25f;

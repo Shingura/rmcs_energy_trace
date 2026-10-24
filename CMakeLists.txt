@@ -40,7 +40,7 @@ target_link_libraries(${PROJECT_NAME}
 
 # GCC 14 对 PCL ICP 内部 SVD 估计中的 Eigen 表达式误报 -Warray-bounds
 set_source_files_properties(
-  ${PROJECT_SOURCE_DIR}/src/pose/point_cloud_registration.cpp
+  ${PROJECT_SOURCE_DIR}/src/registration/registration.cpp
   PROPERTIES COMPILE_OPTIONS -Wno-array-bounds
 )
 
@@ -53,23 +53,23 @@ install(TARGETS energy_unit_detect DESTINATION lib/${PROJECT_NAME})
 add_executable(mask_ablation tool/mask_ablation.cpp)
 target_link_libraries(mask_ablation PRIVATE ${PROJECT_NAME})
 target_compile_definitions(mask_ablation PRIVATE
-  RMCS_ENERGY_UNIT_MODEL="${PROJECT_SOURCE_DIR}/models/energy_unit.stl"
+  RMCS_ENERGY_UNIT_MESH="${PROJECT_SOURCE_DIR}/meshes/energy_unit.stl"
 )
 install(TARGETS mask_ablation DESTINATION lib/${PROJECT_NAME})
 
 pluginlib_export_plugin_description_file(rmcs_executor plugins.xml)
 
-install(DIRECTORY config models DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY config meshes DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
 
-  ament_add_gtest(test_point_cloud_registration test/point_cloud_registration.cpp)
-  target_link_libraries(test_point_cloud_registration ${PROJECT_NAME})
-  target_compile_definitions(test_point_cloud_registration PRIVATE
-    RMCS_ENERGY_UNIT_MODEL="${PROJECT_SOURCE_DIR}/models/energy_unit.stl"
+  ament_add_gtest(test_registration test/registration.cpp)
+  target_link_libraries(test_registration ${PROJECT_NAME})
+  target_compile_definitions(test_registration PRIVATE
+    RMCS_ENERGY_UNIT_MESH="${PROJECT_SOURCE_DIR}/meshes/energy_unit.stl"
   )
-  set_tests_properties(test_point_cloud_registration PROPERTIES TIMEOUT 300)
+  set_tests_properties(test_registration PROPERTIES TIMEOUT 300)
 
   ament_add_gtest(test_depth_mask test/depth_mask.cpp)
   target_link_libraries(test_depth_mask ${PROJECT_NAME})

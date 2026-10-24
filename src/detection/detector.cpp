@@ -1,4 +1,4 @@
-#include "detection/energy_unit_detection.hpp"
+#include "detection/detector.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -13,11 +13,11 @@
 #include <openvino/runtime/core.hpp>
 #include <openvino/runtime/exception.hpp>
 
-#include "detection/models/energy_unit_yolo.hpp"
+#include "detection/yolo11.hpp"
 
 namespace rmcs_energy_trace::detection {
 
-struct EnergyUnitDetection::Impl {
+struct Detector::Impl {
     using Clock = std::chrono::steady_clock;
 
     Config config;
@@ -46,26 +46,26 @@ struct EnergyUnitDetection::Impl {
 
         try {
             const auto device = config.infer_device.empty() ? "CPU" : config.infer_device;
-            openvino_model = EnergyUnitYolo::compile(openvino_core, config.model_location, device);
+            openvino_model = Yolo11::compile(openvino_core, config.network_path, device);
             request = openvino_model.create_infer_request();
 
             initialized = true;
             return {};
         } catch (const std::exception& e) {
             return std::unexpected{
-                std::string{"Failed to load energy unit model | "} + e.what(),
+                std::string{"Failed to load energy unit network | "} + e.what(),
             };
         } catch (...) {
             return std::unexpected{
-                std::string{"Failed to load energy unit model caused by unknown exception"},
+                std::string{"Failed to load energy unit network caused by unknown exception"},
             };
         }
     }
 
     // 居中 letterbox，填充 (114,114,114)，与训练 / ultralytics 一致
     static Letterbox letterbox(const cv::Mat& image, cv::Mat& canvas) noexcept {
-        const auto rows = static_cast<int>(EnergyUnitYolo::kInputHeight);
-        const auto cols = static_cast<int>(EnergyUnitYolo::kInputWidth);
+        const auto rows = static_cast<int>(Yolo11::kInputHeight);
+        const auto cols = static_cast<int>(Yolo11::kInputWidth);
 
         const auto r = std::min(
             static_cast<float>(rows) / static_cast<float>(image.rows),
@@ -97,10 +97,10 @@ struct EnergyUnitDetection::Impl {
         try {
             const auto t0 = Clock::now();
 
-            auto input_tensor = ov::Tensor{ov::element::u8, EnergyUnitYolo::input_shape()};
+            auto input_tensor = ov::Tensor{ov::element::u8, Yolo11::input_shape()};
             auto canvas = cv::Mat{
-                static_cast<int>(EnergyUnitYolo::kInputHeight),
-                static_cast<int>(EnergyUnitYolo::kInputWidth), CV_8UC3, input_tensor.data()};
+                static_cast<int>(Yolo11::kInputHeight), static_cast<int>(Yolo11::kInputWidth),
+                CV_8UC3, input_tensor.data()};
             const auto lb = letterbox(image, canvas);
 
             const auto t1 = Clock::now();
@@ -127,7 +127,7 @@ struct EnergyUnitDetection::Impl {
     Detections decode(ov::Tensor tensor, const Letterbox& lb, cv::Size size) const {
         const auto& shape = tensor.get_shape();
         // [1, 5, N]，按属性主序存储
-        if (shape.size() != 3 || shape[1] != EnergyUnitYolo::kAttributes)
+        if (shape.size() != 3 || shape[1] != Yolo11::kAttributes)
             return {};
 
         const auto count = shape[2];
@@ -180,21 +180,17 @@ struct EnergyUnitDetection::Impl {
     }
 };
 
-std::expected<void, std::string> EnergyUnitDetection::initialize(const Config& config) noexcept {
+std::expected<void, std::string> Detector::initialize(const Config& config) noexcept {
     return pimpl_->initialize(config);
 }
 
-EnergyUnitDetection::Detections EnergyUnitDetection::detect(const cv::Mat& bgr) noexcept {
-    return pimpl_->detect(bgr);
-}
+Detector::Detections Detector::detect(const cv::Mat& bgr) noexcept { return pimpl_->detect(bgr); }
 
-EnergyUnitDetection::Timing EnergyUnitDetection::last_timing() const noexcept {
-    return pimpl_->timing;
-}
+Detector::Timing Detector::last_timing() const noexcept { return pimpl_->timing; }
 
-EnergyUnitDetection::EnergyUnitDetection() noexcept
+Detector::Detector() noexcept
     : pimpl_{std::make_unique<Impl>()} {}
 
-EnergyUnitDetection::~EnergyUnitDetection() noexcept = default;
+Detector::~Detector() noexcept = default;
 
 } // namespace rmcs_energy_trace::detection

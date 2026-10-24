@@ -10,11 +10,11 @@
 #include <opencv2/core/mat.hpp>
 #include <opencv2/core/types.hpp>
 
-#include "pose/mesh_model.hpp"
-#include "pose/point_cloud_registration.hpp"
+#include "geometry/camera.hpp"
+#include "geometry/mesh.hpp"
 #include "utility/pimpl.hpp"
 
-namespace rmcs_energy_trace::pose {
+namespace rmcs_energy_trace::synthetic {
 
 // 合成深度图渲染器：对模型表面密采样做 z-buffer 投影，可叠加平面并加高斯噪声
 class DepthRenderer {
@@ -24,7 +24,7 @@ public:
     struct Config {
         int width = 640;
         int height = 480;
-        PointCloudRegistration::Intrinsics intrinsics{600., 600., 320., 240.};
+        geometry::CameraIntrinsics intrinsics{600., 600., 320., 240.};
 
         std::size_t sample_count = 1'500'000;
         std::uint32_t seed = 7;
@@ -59,10 +59,10 @@ public:
     };
 
     // 初始化并登记第 0 号网格
-    void initialize(const Mesh& mesh, const Config& config) noexcept;
+    void initialize(const geometry::Mesh& mesh, const Config& config) noexcept;
 
     // 追加登记一个网格，返回其编号
-    std::size_t add_mesh(const Mesh& mesh) noexcept;
+    std::size_t add_mesh(const geometry::Mesh& mesh) noexcept;
 
     // pose 为模型到相机，plane 非空时同时渲染该平面
     Frame render(
@@ -75,4 +75,4 @@ public:
         const std::optional<Plane>& plane) const noexcept;
 };
 
-} // namespace rmcs_energy_trace::pose
+} // namespace rmcs_energy_trace::synthetic

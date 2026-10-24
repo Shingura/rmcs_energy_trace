@@ -13,7 +13,7 @@ namespace rmcs_energy_trace::detection {
 //
 // 输入：u8 BGR NHWC（letterbox 之后），由 OpenVINO 预处理转为 f32 RGB NCHW 并除以 255。
 // 输出：[1, 5, 8400]，没有张量名，按下标访问；每个属性占一行，依次为 cx, cy, w, h, score。
-struct EnergyUnitYolo {
+struct Yolo11 {
     static constexpr std::size_t kInputWidth = 640;
     static constexpr std::size_t kInputHeight = 640;
     static constexpr std::size_t kAttributes = 5;

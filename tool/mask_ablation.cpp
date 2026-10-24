@@ -18,26 +18,32 @@
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 
-#include "pose/depth_renderer.hpp"
-#include "pose/mesh_model.hpp"
-#include "pose/point_cloud_registration.hpp"
+#include "geometry/camera.hpp"
+#include "geometry/mesh.hpp"
+#include "registration/registration.hpp"
+#include "synthetic/depth_renderer.hpp"
 
-#ifndef RMCS_ENERGY_UNIT_MODEL
-# error "RMCS_ENERGY_UNIT_MODEL must be defined"
+#ifndef RMCS_ENERGY_UNIT_MESH
+# error "RMCS_ENERGY_UNIT_MESH must be defined"
 #endif
 
 // 消融实验：同一帧合成深度图上，比较只用检测框与加实例掩码的点云配准。
 // 场景与测试 B 相同（能量单元直立在地面上，相机俯视 30~60 度，距离 0.4~0.8 m），
 // 另在目标旁放 1~2 个相邻的能量单元。
 
-using namespace rmcs_energy_trace::pose;
+using rmcs_energy_trace::geometry::CameraIntrinsics;
+using rmcs_energy_trace::geometry::load_binary_stl;
+using rmcs_energy_trace::geometry::Mesh;
+using rmcs_energy_trace::geometry::sample_surface;
+using rmcs_energy_trace::registration::Registration;
+using rmcs_energy_trace::synthetic::DepthRenderer;
 using Clock = std::chrono::steady_clock;
 
 namespace {
 
 constexpr int kWidth = 640;
 constexpr int kHeight = 480;
-constexpr PointCloudRegistration::Intrinsics kIntrinsics{600., 600., 320., 240.};
+constexpr CameraIntrinsics kIntrinsics{600., 600., 320., 240.};
 
 // 与测试 B 一致：地面在目标中心之下 0.0725 m
 constexpr double kGroundOffset = 0.0725;
@@ -326,7 +332,7 @@ struct Stats {
 };
 
 auto run_registration(
-    const PointCloudRegistration& registration, const PointCloudRegistration::Cloud& cloud,
+    const Registration& registration, const Registration::Cloud& cloud,
     const Eigen::Isometry3d& truth, Clock::time_point begin) -> Outcome {
     auto outcome = Outcome{};
     const auto result = registration.register_cloud(cloud);
@@ -368,7 +374,7 @@ void print_row(const Stats& stats) {
 auto main(int argc, char* argv[]) -> int {
     auto trials = std::size_t{40};
     auto seed = std::uint32_t{2025};
-    auto model_path = std::string{RMCS_ENERGY_UNIT_MODEL};
+    auto mesh_path = std::string{RMCS_ENERGY_UNIT_MESH};
 
     for (int i = 1; i < argc; i++) {
         const auto arg = std::string{argv[i]};
@@ -376,18 +382,18 @@ auto main(int argc, char* argv[]) -> int {
             trials = std::strtoul(argv[++i], nullptr, 10);
         } else if (arg == "--seed" && i + 1 < argc) {
             seed = static_cast<std::uint32_t>(std::strtoul(argv[++i], nullptr, 10));
-        } else if (arg == "--model" && i + 1 < argc) {
-            model_path = argv[++i];
+        } else if (arg == "--mesh" && i + 1 < argc) {
+            mesh_path = argv[++i];
         } else {
             std::println(
-                "Usage: mask_ablation [--trials 40] [--seed 2025] [--model <energy_unit.stl>]");
+                "Usage: mask_ablation [--trials 40] [--seed 2025] [--mesh <energy_unit.stl>]");
             return EXIT_FAILURE;
         }
     }
     if (trials == 0)
         return EXIT_FAILURE;
 
-    auto mesh = load_binary_stl(model_path);
+    auto mesh = load_binary_stl(mesh_path);
     if (!mesh.has_value()) {
         std::println(stderr, "{}", mesh.error());
         return EXIT_FAILURE;
@@ -396,9 +402,9 @@ auto main(int argc, char* argv[]) -> int {
     renderer.initialize(
         *mesh,
         DepthRenderer::Config{.width = kWidth, .height = kHeight, .intrinsics = kIntrinsics});
-    auto registration = PointCloudRegistration{};
-    const auto registration_config = PointCloudRegistration::Config{};
-    if (auto initialized = registration.initialize(model_path, registration_config);
+    auto registration = Registration{};
+    const auto registration_config = Registration::Config{};
+    if (auto initialized = registration.initialize(mesh_path, registration_config);
         !initialized.has_value()) {
         std::println(stderr, "{}", initialized.error());
         return EXIT_FAILURE;
@@ -465,8 +471,8 @@ auto main(int argc, char* argv[]) -> int {
         const auto run = [&](const cv::Mat& depth, const cv::Rect2i& box, const cv::Mat& mask) {
             const auto begin = Clock::now();
             const auto cloud = mask.empty()
-                                 ? PointCloudRegistration::depth_to_cloud(depth, kIntrinsics, box)
-                                 : PointCloudRegistration::depth_to_cloud(
+                                 ? Registration::depth_to_cloud(depth, kIntrinsics, box)
+                                 : Registration::depth_to_cloud(
                                        depth, kIntrinsics, box, mask, registration_config);
             return run_registration(registration, *cloud, scene.target, begin);
         };

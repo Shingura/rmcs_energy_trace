@@ -34,12 +34,15 @@ RMCS 工程机器人的能量单元位姿估计组件。它读取 RGB-D 相机�
 |---|---|
 | `src/component.cpp` | 组件，负责接口和调度 |
 | `src/detection/` | YOLO11 检测（OpenVINO，CPU） |
-| `src/pose/` | STL 读取、点云配准、合成深度图渲染 |
+| `src/registration/` | 点云配准：深度图转点云、FPFH 粗配准、ICP 精配准 |
+| `src/geometry/` | 公共的几何类型：STL 网格读取与表面采样、相机内参 |
+| `src/synthetic/` | 合成深度图渲染，只供测试和离线工具使用 |
+| `src/utility/` | 通用辅助代码 |
 | `test/` | 离线测试，不需要相机 |
 | `tool/` | 离线工具，例如 `energy_unit_detect` |
 | `scripts/` | Python 脚本，例如把 YOLO 权重导出为 OpenVINO 格式 |
 | `config/` | 参数示例 |
-| `models/energy_unit.stl` | 能量单元 3D 模型，单位 mm，原点在外包长方体的一角 |
+| `meshes/energy_unit.stl` | 能量单元 3D 模型，单位 mm，原点在外包长方体的一角 |
 
 模型权重和数据集不放进仓库，见 `.gitignore`。
 
@@ -48,26 +51,26 @@ RMCS 工程机器人的能量单元位姿估计组件。它读取 RGB-D 相机�
 配准测试在合成深度图上各运行 20 次。合格标准是中心误差小于 3 mm，且长轴方向误差小于 2°。
 
 ```zsh
-/workspaces/RMCS/rmcs_ws/build/rmcs_energy_trace/test_point_cloud_registration
+/workspaces/RMCS/rmcs_ws/build/rmcs_energy_trace/test_registration
 ```
 
 检测工具对一张图片或一个目录中的图片运行检测，并保存画好框的结果：
 
 ```zsh
-ros2 run rmcs_energy_trace energy_unit_detect <model.xml> <图片或目录> <输出目录> [--conf 0.25]
+ros2 run rmcs_energy_trace energy_unit_detect <network.xml> <图片或目录> <输出目录> [--conf 0.25]
 ```
 
-`model.xml` 由 `scripts/export_yolo.py` 从 Ultralytics 的 `.pt` 权重导出。
+`network.xml` 由 `scripts/export_yolo.py` 从 Ultralytics 的 `.pt` 权重导出。
 
 掩码消融工具在合成深度图上比较点云配准只用检测框和再加实例掩码的效果。场景与测试 B 相同，并在目标旁放 1 到 2 个相邻的能量单元（间距 5、20 或 50 mm，直立或平躺，部分试验挡在目标前面）。每帧运行 3 种输入：只用框、框加精确掩码、框加模拟 YOLO-seg 的退化掩码，另有一组无相邻单元的对照。默认 40 次试验，每次约 3 s。
 
 ```zsh
-ros2 run rmcs_energy_trace mask_ablation [--trials 40] [--seed 2025]
+ros2 run rmcs_energy_trace mask_ablation [--trials 40] [--seed 2025] [--mesh <energy_unit.stl>]
 ```
 
 输出每次试验的误差和汇总表（成功率、中心和轴向误差的中位数与最大值、无结果次数、耗时）。结果来自合成数据，没有真实传感器的噪声和边缘伪影，只能作为参考。
 
-配准的 `depth_to_cloud` 有带掩码的重载，掩码先按 `Config::mask_erosion_px`（默认 3 px）向内腐蚀。`test_depth_mask` 是它的单元测试。
+`registration::Registration::depth_to_cloud` 有带掩码的重载，掩码先按 `Config::mask_erosion_px`（默认 3 px）向内腐蚀。`test_depth_mask` 是它的单元测试。
 
 ## 构建
 
@@ -89,7 +92,7 @@ rmcs_executor:
 
 energy_trace:
   ros__parameters:
-    model_path: ""
+    mesh_path: ""
 ```
 
 参数说明见 `config/energy_trace.yaml`。

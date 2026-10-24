@@ -8,5 +8,5 @@
 
 energy_trace:
   ros__parameters:
-    # 能量单元 3D 模型（STL，单位 mm），留空时使用包内的 models/energy_unit.stl
-    model_path: ""
+    # 能量单元 3D 模型（STL，单位 mm），留空时使用包内的 meshes/energy_unit.stl
+    mesh_path: ""

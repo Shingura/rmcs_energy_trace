@@ -13,21 +13,27 @@
 #include <opencv2/core.hpp>
 #include <pcl/kdtree/kdtree_flann.h>
 
-#include "pose/depth_renderer.hpp"
-#include "pose/mesh_model.hpp"
-#include "pose/point_cloud_registration.hpp"
+#include "geometry/camera.hpp"
+#include "geometry/mesh.hpp"
+#include "registration/registration.hpp"
+#include "synthetic/depth_renderer.hpp"
 
-#ifndef RMCS_ENERGY_UNIT_MODEL
-# error "RMCS_ENERGY_UNIT_MODEL must be defined"
+#ifndef RMCS_ENERGY_UNIT_MESH
+# error "RMCS_ENERGY_UNIT_MESH must be defined"
 #endif
 
-using namespace rmcs_energy_trace::pose;
+using rmcs_energy_trace::geometry::CameraIntrinsics;
+using rmcs_energy_trace::geometry::load_binary_stl;
+using rmcs_energy_trace::geometry::Mesh;
+using rmcs_energy_trace::geometry::sample_surface;
+using rmcs_energy_trace::registration::Registration;
+using rmcs_energy_trace::synthetic::DepthRenderer;
 
 namespace {
 
 constexpr int kWidth = 640;
 constexpr int kHeight = 480;
-constexpr PointCloudRegistration::Intrinsics kIntrinsics{600., 600., 320., 240.};
+constexpr CameraIntrinsics kIntrinsics{600., 600., 320., 240.};
 
 constexpr std::size_t kTrials = 20;
 constexpr std::size_t kRequiredPass = 18;
@@ -82,10 +88,10 @@ private:
     DepthRenderer renderer_;
 };
 
-class PointCloudRegistrationTest : public testing::Test {
+class RegistrationTest : public testing::Test {
 protected:
     static void SetUpTestSuite() {
-        auto mesh = load_binary_stl(RMCS_ENERGY_UNIT_MODEL);
+        auto mesh = load_binary_stl(RMCS_ENERGY_UNIT_MESH);
         ASSERT_TRUE(mesh.has_value()) << mesh.error();
         mesh_ = std::make_unique<Mesh>(std::move(*mesh));
         renderer_ = std::make_unique<Renderer>(*mesh_);
@@ -103,8 +109,8 @@ protected:
         }
         reference_tree_.setInputCloud(reference);
 
-        registration_ = std::make_unique<PointCloudRegistration>();
-        ASSERT_TRUE(registration_->initialize(RMCS_ENERGY_UNIT_MODEL).has_value());
+        registration_ = std::make_unique<Registration>();
+        ASSERT_TRUE(registration_->initialize(RMCS_ENERGY_UNIT_MESH).has_value());
     }
 
     static auto adds(const Eigen::Isometry3d& truth, const Eigen::Isometry3d& estimate) -> double {
@@ -135,8 +141,7 @@ protected:
 
         for (std::size_t i = 0; i < trials.size(); i++) {
             const auto& trial = trials[i];
-            const auto cloud =
-                PointCloudRegistration::depth_to_cloud(trial.depth, kIntrinsics, trial.roi);
+            const auto cloud = Registration::depth_to_cloud(trial.depth, kIntrinsics, trial.roi);
             const auto result = registration_->register_cloud(*cloud);
             if (!result.has_value()) {
                 std::println("[{}] #{:02} no result (cloud {} points)", name, i, cloud->size());
@@ -188,12 +193,12 @@ protected:
     static inline std::unique_ptr<Renderer> renderer_;
     static inline pcl::KdTreeFLANN<pcl::PointXYZ> reference_tree_;
     static inline pcl::PointCloud<pcl::PointXYZ>::Ptr evaluation_xyz_;
-    static inline std::unique_ptr<PointCloudRegistration> registration_;
+    static inline std::unique_ptr<Registration> registration_;
 };
 
 } // namespace
 
-TEST_F(PointCloudRegistrationTest, RandomOrientationNoBackground) {
+TEST_F(RegistrationTest, RandomOrientationNoBackground) {
     // NOLINTNEXTLINE(cert-msc51-cpp): 固定种子保证测试可复现
     auto engine = std::mt19937{2024};
     auto trials = std::vector<Trial>{};
@@ -213,7 +218,7 @@ TEST_F(PointCloudRegistrationTest, RandomOrientationNoBackground) {
     run_case("A", trials);
 }
 
-TEST_F(PointCloudRegistrationTest, UprightOnGroundPlane) {
+TEST_F(RegistrationTest, UprightOnGroundPlane) {
     // NOLINTNEXTLINE(cert-msc51-cpp): 固定种子保证测试可复现
     auto engine = std::mt19937{4048};
     auto trials = std::vector<Trial>{};

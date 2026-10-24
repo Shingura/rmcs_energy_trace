@@ -1,5 +1,6 @@
 #pragma once
 
+#include "geometry/camera.hpp"
 #include "utility/pimpl.hpp"
 
 #include <cstddef>
@@ -14,10 +15,10 @@
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 
-namespace rmcs_energy_trace::pose {
+namespace rmcs_energy_trace::registration {
 
-class PointCloudRegistration {
-    RMCS_PIMPL_DEFINITION(PointCloudRegistration)
+class Registration {
+    RMCS_PIMPL_DEFINITION(Registration)
 
 public:
     using Cloud = pcl::PointCloud<pcl::PointXYZ>;
@@ -62,10 +63,6 @@ public:
         float max_fitness = 4e-5f;
     };
 
-    struct Intrinsics {
-        double fx, fy, cx, cy;
-    };
-
     struct Timing {
         double preprocess_ms = 0.;
         double feature_ms = 0.;
@@ -83,17 +80,18 @@ public:
 
     // 深度图 (CV_16UC1, mm, 0 为无效) 在 roi 内反投影为相机系点云 (m, x 右 y 下 z 前)
     static Cloud::Ptr depth_to_cloud(
-        const cv::Mat& depth, const Intrinsics& intrinsics, const cv::Rect2i& roi) noexcept;
+        const cv::Mat& depth, const geometry::CameraIntrinsics& intrinsics,
+        const cv::Rect2i& roi) noexcept;
 
     // 同上，并只保留掩码 (CV_8UC1，与深度图同尺寸，非 0 保留) 内的像素，
     // 掩码先按 config.mask_erosion_px 内缩。掩码为空时与不带掩码的版本一致，
     // 类型或尺寸不符时返回空点云
     static Cloud::Ptr depth_to_cloud(
-        const cv::Mat& depth, const Intrinsics& intrinsics, const cv::Rect2i& roi,
+        const cv::Mat& depth, const geometry::CameraIntrinsics& intrinsics, const cv::Rect2i& roi,
         const cv::Mat& mask, const Config& config) noexcept;
     // 使用默认的 Config
     static Cloud::Ptr depth_to_cloud(
-        const cv::Mat& depth, const Intrinsics& intrinsics, const cv::Rect2i& roi,
+        const cv::Mat& depth, const geometry::CameraIntrinsics& intrinsics, const cv::Rect2i& roi,
         const cv::Mat& mask) noexcept;
 
     std::expected<void, std::string>
@@ -103,4 +101,4 @@ public:
     std::optional<Result> register_cloud(const Cloud& scene) const noexcept;
 };
 
-} // namespace rmcs_energy_trace::pose
+} // namespace rmcs_energy_trace::registration

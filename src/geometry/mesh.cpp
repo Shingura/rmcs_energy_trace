@@ -1,4 +1,4 @@
-#include "pose/mesh_model.hpp"
+#include "geometry/mesh.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -8,7 +8,7 @@
 #include <memory>
 #include <random>
 
-namespace rmcs_energy_trace::pose {
+namespace rmcs_energy_trace::geometry {
 
 namespace {
 
@@ -111,4 +111,4 @@ pcl::PointCloud<pcl::PointNormal>::Ptr
     return cloud;
 }
 
-} // namespace rmcs_energy_trace::pose
+} // namespace rmcs_energy_trace::geometry

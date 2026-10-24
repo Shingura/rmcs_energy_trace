@@ -1,0 +1,4 @@
+# PCL 带入的 -fopenmp 会让 clangd 包含 omp.h，而 Clang 自带的头文件中没有它。
+# 只在 clangd 分析时去掉这个参数，实际编译不受影响。
+CompileFlags:
+  Remove: [-fopenmp]

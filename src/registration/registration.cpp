@@ -1,4 +1,4 @@
-#include "pose/point_cloud_registration.hpp"
+#include "registration/registration.hpp"
 
 #include <chrono>
 #include <cmath>
@@ -7,7 +7,7 @@
 
 #include <opencv2/imgproc.hpp>
 
-#include "pose/mesh_model.hpp"
+#include "geometry/mesh.hpp"
 
 #include <pcl/ModelCoefficients.h>
 #include <pcl/features/fpfh_omp.h>
@@ -21,12 +21,12 @@
 #include <pcl/registration/transformation_estimation_point_to_plane_lls.h>
 #include <pcl/segmentation/sac_segmentation.h>
 
-namespace rmcs_energy_trace::pose {
+namespace rmcs_energy_trace::registration {
 
 namespace {
 
 using Clock = std::chrono::steady_clock;
-using Cloud = PointCloudRegistration::Cloud;
+using Cloud = Registration::Cloud;
 using NormalCloud = pcl::PointCloud<pcl::PointNormal>;
 using Fpfh = pcl::PointCloud<pcl::FPFHSignature33>;
 
@@ -70,7 +70,7 @@ pcl::PointCloud<pcl::Normal>::Ptr compute_normals(const Cloud::Ptr& cloud, float
 
 } // namespace
 
-struct PointCloudRegistration::Impl {
+struct Registration::Impl {
     Config config;
     bool initialized = false;
 
@@ -85,11 +85,11 @@ struct PointCloudRegistration::Impl {
         initialize(const std::string& stl_path, const Config& new_config) noexcept {
         config = new_config;
 
-        auto mesh = load_binary_stl(stl_path);
+        auto mesh = geometry::load_binary_stl(stl_path);
         if (!mesh.has_value())
             return std::unexpected{mesh.error()};
 
-        const auto sampled = sample_surface(*mesh, config.model_sample_count, 42);
+        const auto sampled = geometry::sample_surface(*mesh, config.model_sample_count, 42);
 
         // 体素下采样 PointNormal，体素内法线取平均后归一化
         const auto downsample = [&](float leaf) {
@@ -308,20 +308,21 @@ struct PointCloudRegistration::Impl {
     }
 };
 
-PointCloudRegistration::Cloud::Ptr PointCloudRegistration::depth_to_cloud(
-    const cv::Mat& depth, const Intrinsics& intrinsics, const cv::Rect2i& roi) noexcept {
+Registration::Cloud::Ptr Registration::depth_to_cloud(
+    const cv::Mat& depth, const geometry::CameraIntrinsics& intrinsics,
+    const cv::Rect2i& roi) noexcept {
     return depth_to_cloud(depth, intrinsics, roi, cv::Mat{}, Config{});
 }
 
-PointCloudRegistration::Cloud::Ptr PointCloudRegistration::depth_to_cloud(
-    const cv::Mat& depth, const Intrinsics& intrinsics, const cv::Rect2i& roi,
+Registration::Cloud::Ptr Registration::depth_to_cloud(
+    const cv::Mat& depth, const geometry::CameraIntrinsics& intrinsics, const cv::Rect2i& roi,
     const cv::Mat& mask) noexcept {
     return depth_to_cloud(depth, intrinsics, roi, mask, Config{});
 }
 
-PointCloudRegistration::Cloud::Ptr PointCloudRegistration::depth_to_cloud(
-    const cv::Mat& depth, const Intrinsics& intrinsics, const cv::Rect2i& roi, const cv::Mat& mask,
-    const Config& config) noexcept {
+Registration::Cloud::Ptr Registration::depth_to_cloud(
+    const cv::Mat& depth, const geometry::CameraIntrinsics& intrinsics, const cv::Rect2i& roi,
+    const cv::Mat& mask, const Config& config) noexcept {
     auto cloud = std::make_shared<Cloud>();
     if (depth.type() != CV_16UC1)
         return cloud;
@@ -359,23 +360,22 @@ PointCloudRegistration::Cloud::Ptr PointCloudRegistration::depth_to_cloud(
 }
 
 std::expected<void, std::string>
-    PointCloudRegistration::initialize(const std::string& stl_path, const Config& config) noexcept {
+    Registration::initialize(const std::string& stl_path, const Config& config) noexcept {
     return pimpl_->initialize(stl_path, config);
 }
 
-std::expected<void, std::string>
-    PointCloudRegistration::initialize(const std::string& stl_path) noexcept {
+std::expected<void, std::string> Registration::initialize(const std::string& stl_path) noexcept {
     return pimpl_->initialize(stl_path, Config{});
 }
 
-std::optional<PointCloudRegistration::Result>
-    PointCloudRegistration::register_cloud(const Cloud& scene) const noexcept {
+std::optional<Registration::Result>
+    Registration::register_cloud(const Cloud& scene) const noexcept {
     return pimpl_->register_cloud(scene);
 }
 
-PointCloudRegistration::PointCloudRegistration() noexcept
+Registration::Registration() noexcept
     : pimpl_{std::make_unique<Impl>()} {}
 
-PointCloudRegistration::~PointCloudRegistration() noexcept = default;
+Registration::~Registration() noexcept = default;
 
-} // namespace rmcs_energy_trace::pose
+} // namespace rmcs_energy_trace::registration
