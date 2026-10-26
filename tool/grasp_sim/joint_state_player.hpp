@@ -26,9 +26,20 @@ public:
         , velocities_(names_.size(), 0.)
         , speed_{speed}
         , publisher_{node.create_publisher<sensor_msgs::msg::JointState>("/joint_states", 10)}
-        , clock_{node.get_clock()} {
+        , clock_{node.get_clock()}
+        , context_{node.get_node_base_interface()->get_context()} {
         timer_ = node.create_wall_timer(std::chrono::milliseconds{20}, [this] { tick(); });
+        // 关闭后定时器不再触发，回放不会结束；唤醒 play，让它返回
+        shutdown_callback_ = context_->add_on_shutdown_callback([this] {
+            const auto lock = std::scoped_lock{mutex_};
+            done_.notify_all();
+        });
     }
+
+    ~JointStatePlayer() { context_->remove_on_shutdown_callback(shutdown_callback_); }
+
+    JointStatePlayer(const JointStatePlayer&) = delete;
+    JointStatePlayer& operator=(const JointStatePlayer&) = delete;
 
     auto positions() const -> std::vector<double> {
         const auto lock = std::scoped_lock{mutex_};
@@ -42,13 +53,14 @@ public:
         std::ranges::fill(velocities_, 0.);
     }
 
-    // 阻塞回放，直到轨迹结束
-    void play(const trajectory_msgs::msg::JointTrajectory& trajectory) {
+    // 阻塞回放，直到轨迹结束。ROS 关闭时提前返回 false，调用方不应再调用 ROS 接口
+    bool play(const trajectory_msgs::msg::JointTrajectory& trajectory) {
         if (trajectory.points.empty())
-            return;
+            return true;
         auto lock = std::unique_lock{mutex_};
         active_ = Active{trajectory, Clock::now(), map_joints(trajectory)};
-        done_.wait(lock, [this] { return !active_.has_value(); });
+        done_.wait(lock, [this] { return !active_.has_value() || !rclcpp::ok(context_); });
+        return !active_.has_value();
     }
 
 private:
@@ -111,9 +123,16 @@ private:
             done_.notify_all();
             return;
         }
-        auto j = std::size_t{1};
-        while (j < points.size() - 1 && seconds(points[j].time_from_start) < elapsed)
+        // 第一个时间不早于 elapsed 的点；轨迹终点晚于 elapsed，所以一定存在
+        auto j = std::size_t{0};
+        while (seconds(points[j].time_from_start) < elapsed)
             j++;
+        if (j == 0) {
+            // 还没到第一个点的时间：停在第一个点
+            apply(0, 0., 0);
+            std::ranges::fill(velocities_, 0.);
+            return;
+        }
         const auto t0 = seconds(points[j - 1].time_from_start);
         const auto t1 = seconds(points[j].time_from_start);
         const auto blend = t1 > t0 ? std::clamp((elapsed - t0) / (t1 - t0), 0., 1.) : 1.;
@@ -134,6 +153,8 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr publisher_;
     rclcpp::Clock::SharedPtr clock_;
     rclcpp::TimerBase::SharedPtr timer_;
+    rclcpp::Context::SharedPtr context_;
+    rclcpp::OnShutdownCallbackHandle shutdown_callback_;
 
     mutable std::mutex mutex_;
     std::condition_variable done_;

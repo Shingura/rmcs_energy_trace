@@ -140,6 +140,9 @@ public:
         build_scene();
         if (!perceive())
             return 1;
+        // estimated_pose_ 只在 perceive 中写入，之后定时器线程才开始读取
+        republish_timer_ =
+            node_->create_wall_timer(std::chrono::seconds{1}, [this] { publish_visuals(); });
         publish_visuals();
 
         wait_for_move_group();
@@ -282,9 +285,6 @@ private:
         transform.header.frame_id = kFrame;
         transform.child_frame_id = kCameraFrame;
         tf_broadcaster_->sendTransform(transform);
-
-        republish_timer_ =
-            node_->create_wall_timer(std::chrono::seconds{1}, [this] { publish_visuals(); });
     }
 
     // ---- 感知 ----
@@ -682,19 +682,23 @@ private:
         std::this_thread::sleep_for(std::chrono::duration<double>{viewer_delay_});
     }
 
+    // 依次播放三段轨迹。ROS 关闭（例如 Ctrl-C）时停止
     void execute(const Stage& pre, const Stage& approach, const Stage& lift) {
         scene_interface_->applyCollisionObject(object_message(estimated_pose_));
         RCLCPP_INFO(logger_, "executing pre-grasp ...");
-        player_->play(pre.trajectory);
+        if (!player_->play(pre.trajectory))
+            return;
         RCLCPP_INFO(logger_, "executing approach ...");
-        player_->play(approach.trajectory);
+        if (!player_->play(approach.trajectory))
+            return;
 
         // 附着到 link_6：先移出世界，再以附着体加入
         remove_object();
         auto aco = state_message(approach.end, true).attached_collision_objects.front();
         scene_interface_->applyAttachedCollisionObject(aco);
         RCLCPP_INFO(logger_, "attached, executing lift ...");
-        player_->play(lift.trajectory);
+        if (!player_->play(lift.trajectory))
+            return;
         set_text(
             std::format(
                 "grasped: center err {:.2f} mm, axis err {:.2f} "
