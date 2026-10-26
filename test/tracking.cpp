@@ -280,14 +280,17 @@ protected:
         EXPECT_LT(median(stats.axis_deg), kMedianAxisDeg);
     }
 
-    // 初始位姿加 3 mm 平移和 2° 旋转（沿相机系 (1,1,1) 方向）
+    // 模拟配准给出的初始位姿：绕自身长轴转 60°，再加 3 mm 平移和 2° 旋转（沿相机系 (1,1,1) 方向）。
+    // 绕长轴的转角无法观测，配准结果可能偏任意角度；3 重对称下最大偏差为 60°
     static auto perturb(const Eigen::Isometry3d& pose) -> Eigen::Isometry3d {
         const Eigen::Vector3d direction = Eigen::Vector3d{1., 1., 1.}.normalized();
         auto result = pose;
         result.translation() += 0.003 * direction;
         result.linear() =
             Eigen::AngleAxisd{2. * std::numbers::pi / 180., direction}.toRotationMatrix()
-            * pose.linear();
+            * pose.linear()
+            * Eigen::AngleAxisd{60. * std::numbers::pi / 180., Eigen::Vector3d::UnitZ()}
+                  .toRotationMatrix();
         return result;
     }
 
