@@ -14,8 +14,11 @@ build-rmcs --packages-select rmcs_energy_trace
 
 ```zsh
 clang-format -i <文件>
-clang-tidy -p /workspaces/RMCS/rmcs_ws/build/rmcs_energy_trace <文件>
+clang-tidy -p /workspaces/RMCS/rmcs_ws/build/rmcs_energy_trace \
+    --extra-arg=-isystem$PWD/third_party/m3t/stubs/clangd <文件>
 ```
+
+`--extra-arg` 提供空的 `omp.h`。不加时 clang-tidy 因找不到 `omp.h` 解析失败，会报出大量错误的 “can be made static”。命令在包目录下运行。
 
 编译不能有警告。
 

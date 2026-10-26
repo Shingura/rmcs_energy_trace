@@ -12,8 +12,11 @@
   <depend>rclcpp</depend>
   <depend>pluginlib</depend>
   <depend>rmcs_executor</depend>
-  <depend>rmcs_msgs</depend>
-  <depend>Eigen3</depend>
+  <depend>eigen</depend>
+  <depend>libopencv-dev</depend>
+  <depend>libpcl-all-dev</depend>
+  <!-- OpenVINO 没有 rosdep 键，由 RMCS 的 Dockerfile 安装 -->
+  <!-- 抓取仿真 grasp_sim 是可选的开发工具，MoveIt、RViz 等依赖不在这里声明；缺少时 CMake 跳过该目标 -->
 
   <test_depend>ament_cmake_gtest</test_depend>
 
