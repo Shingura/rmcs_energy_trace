@@ -31,7 +31,7 @@
 // 场景与测试 B 相同（能量单元直立在地面上，相机俯视 30~60 度，距离 0.4~0.8 m），
 // 另在目标旁放 1~2 个相邻的能量单元。
 
-using rmcs_energy_trace::geometry::CameraIntrinsics;
+using rmcs_energy_trace::geometry::Camera;
 using rmcs_energy_trace::geometry::load_binary_stl;
 using rmcs_energy_trace::geometry::Mesh;
 using rmcs_energy_trace::geometry::sample_surface;
@@ -43,7 +43,7 @@ namespace {
 
 constexpr int kWidth = 640;
 constexpr int kHeight = 480;
-constexpr CameraIntrinsics kIntrinsics{600., 600., 320., 240.};
+constexpr Camera kCamera{.width = kWidth, .height = kHeight};
 
 // 与测试 B 一致：地面在目标中心之下半个物体长度 (m)，物体恰好落在地面上
 constexpr double kGroundOffset = 0.075;
@@ -339,7 +339,7 @@ auto run_registration(
     const cv::Mat& mask, const Eigen::Isometry3d& truth) -> Outcome {
     auto outcome = Outcome{};
     const auto begin = Clock::now();
-    const auto result = registration.register_depth(depth, kIntrinsics, box, mask);
+    const auto result = registration.register_depth(depth, kCamera, box, mask);
     outcome.time_ms = std::chrono::duration<double, std::milli>{Clock::now() - begin}.count();
     if (!result.has_value())
         return outcome;
@@ -404,9 +404,7 @@ auto main(int argc, char* argv[]) -> int {
         return EXIT_FAILURE;
     }
     auto renderer = DepthRenderer{};
-    renderer.initialize(
-        *mesh,
-        DepthRenderer::Config{.width = kWidth, .height = kHeight, .intrinsics = kIntrinsics});
+    renderer.initialize(*mesh, DepthRenderer::Config{.camera = kCamera});
     auto registration = Registration{};
     if (auto initialized = registration.initialize(mesh_path); !initialized.has_value()) {
         std::println(stderr, "{}", initialized.error());

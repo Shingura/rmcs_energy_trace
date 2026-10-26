@@ -243,13 +243,13 @@ private:
         camera_pose_.linear().col(2) = forward;
         camera_pose_.translation() = eye;
 
-        render_config_.width = param(n, "camera.width", 640);
-        render_config_.height = param(n, "camera.height", 480);
-        const auto fx = param(n, "camera.fx", 600.);
-        const auto fy = param(n, "camera.fy", 600.);
-        render_config_.intrinsics = {
-            fx, fy, param(n, "camera.cx", render_config_.width / 2.),
-            param(n, "camera.cy", render_config_.height / 2.)};
+        auto& camera = render_config_.camera;
+        camera.width = param(n, "camera.width", 640);
+        camera.height = param(n, "camera.height", 480);
+        camera.fx = param(n, "camera.fx", 600.);
+        camera.fy = param(n, "camera.fy", 600.);
+        camera.cx = param(n, "camera.cx", camera.width / 2.);
+        camera.cy = param(n, "camera.cy", camera.height / 2.);
         render_config_.noise_sigma_mm = static_cast<float>(param(n, "camera.noise_sigma_mm", 1.));
         seed_ = static_cast<std::uint32_t>(param(n, "seed", 2024));
 
@@ -307,7 +307,7 @@ private:
         build_cloud_message(frame.depth);
 
         const auto result =
-            registration_.register_depth(frame.depth, render_config_.intrinsics, frame.roi);
+            registration_.register_depth(frame.depth, render_config_.camera, frame.roi);
         if (!result.has_value()) {
             RCLCPP_ERROR(logger_, "registration failed or rejected by quality check");
             set_text("registration failed");
@@ -340,7 +340,7 @@ private:
     void build_cloud_message(const cv::Mat& depth) {
         const auto full = cv::Rect2i{0, 0, depth.cols, depth.rows};
         const auto cloud =
-            registration::Registration::depth_to_cloud(depth, render_config_.intrinsics, full);
+            registration::Registration::depth_to_cloud(depth, render_config_.camera, full);
         auto cropped = pcl::PointCloud<pcl::PointXYZ>{};
         for (const auto& point : *cloud) {
             const Eigen::Vector3d p = camera_pose_ * point.getVector3fMap().cast<double>();

@@ -24,7 +24,7 @@
 # error "RMCS_ENERGY_UNIT_MESH and RMCS_ENERGY_TRACE_MODEL_DIR must be defined"
 #endif
 
-using rmcs_energy_trace::geometry::CameraIntrinsics;
+using rmcs_energy_trace::geometry::Camera;
 using rmcs_energy_trace::geometry::load_binary_stl;
 using rmcs_energy_trace::geometry::Mesh;
 using rmcs_energy_trace::synthetic::DepthRenderer;
@@ -34,7 +34,7 @@ namespace {
 
 constexpr int kWidth = 640;
 constexpr int kHeight = 480;
-constexpr CameraIntrinsics kIntrinsics{600., 600., 320., 240.};
+constexpr Camera kCamera{.width = kWidth, .height = kHeight};
 
 constexpr std::size_t kFrames = 150;
 // 序列的运动上限：每帧平移 5 mm、旋转 2°
@@ -107,8 +107,7 @@ protected:
         half_length_ = -static_cast<double>(lowest);
 
         renderer_ = std::make_unique<DepthRenderer>();
-        auto config = DepthRenderer::Config{
-            .width = kWidth, .height = kHeight, .intrinsics = kIntrinsics, .sample_count = 800'000};
+        auto config = DepthRenderer::Config{.camera = kCamera, .sample_count = 800'000};
         // 两端深色、中段浅色；地面和背景带平滑纹理，并有轻微噪声
         config.color = DepthRenderer::ColorConfig{
             .texture_amplitude = 14.f,
@@ -231,9 +230,7 @@ protected:
     static auto make_config(bool use_region, bool use_depth) -> Tracker::Config {
         auto config = Tracker::Config{};
         config.model_dir = RMCS_ENERGY_TRACE_MODEL_DIR;
-        config.width = kWidth;
-        config.height = kHeight;
-        config.intrinsics = kIntrinsics;
+        config.camera = kCamera;
         config.use_region = use_region;
         config.use_depth = use_depth;
         return config;

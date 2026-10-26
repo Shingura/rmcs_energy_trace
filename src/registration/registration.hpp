@@ -118,21 +118,20 @@ public:
         Timing timing;
     };
 
-    // 深度图 (CV_16UC1, mm, 0 为无效) 在 roi 内反投影为相机系点云 (m, x 右 y 下 z 前)
+    // 深度图 (CV_16UC1，单位见 camera.depth_scale，0 为无效) 在 roi 内反投影为相机系点云 (m)
     static Cloud::Ptr depth_to_cloud(
-        const cv::Mat& depth, const geometry::CameraIntrinsics& intrinsics,
-        const cv::Rect2i& roi) noexcept;
+        const cv::Mat& depth, const geometry::Camera& camera, const cv::Rect2i& roi) noexcept;
 
     // 同上，并只保留掩码 (CV_8UC1，与深度图同尺寸，非 0 保留) 内的像素，
     // 掩码先按 config.mask_erosion_px 内缩。掩码为空时与不带掩码的版本一致，
     // 类型或尺寸不符时返回空点云
     static Cloud::Ptr depth_to_cloud(
-        const cv::Mat& depth, const geometry::CameraIntrinsics& intrinsics, const cv::Rect2i& roi,
+        const cv::Mat& depth, const geometry::Camera& camera, const cv::Rect2i& roi,
         const cv::Mat& mask, const Config& config) noexcept;
     // 注意：这个重载固定使用 Config{} 的默认值（含 mask_erosion_px = 3），不读取任何实例的配置；
     // 需要实例配置时用 register_depth，或显式传入 Config
     static Cloud::Ptr depth_to_cloud(
-        const cv::Mat& depth, const geometry::CameraIntrinsics& intrinsics, const cv::Rect2i& roi,
+        const cv::Mat& depth, const geometry::Camera& camera, const cv::Rect2i& roi,
         const cv::Mat& mask) noexcept;
 
     std::expected<void, std::string>
@@ -146,7 +145,7 @@ public:
     // 深度图 -> 点云（按本实例的 mask_erosion_px 处理掩码）-> 配准 -> 深度一致性检查。
     // mask 为空表示只用 roi。未通过验收（内点率、支持率、空闲空间违例）时返回空
     std::optional<Result> register_depth(
-        const cv::Mat& depth, const geometry::CameraIntrinsics& intrinsics, const cv::Rect2i& roi,
+        const cv::Mat& depth, const geometry::Camera& camera, const cv::Rect2i& roi,
         const cv::Mat& mask = {}) const noexcept;
 };
 

@@ -77,7 +77,7 @@ constexpr float kNoDepth = std::numeric_limits<float>::max();
 // 评价候选位姿所需的实测深度
 struct DepthView {
     const cv::Mat& depth;
-    const geometry::CameraIntrinsics& intrinsics;
+    const geometry::Camera& camera;
     cv::Rect2i roi;      // 已与图像求交
     const cv::Mat& mask; // 空表示不限制
 };
@@ -85,15 +85,15 @@ struct DepthView {
 // 把 mesh 的三角形按位姿 (mesh -> camera) 光栅化为 roi 内的 z-buffer (m)，
 // 无覆盖处为 kNoDepth。像素 (u, v) 的中心位于投影坐标 (u, v)，与 depth_to_cloud 一致
 cv::Mat rasterize_depth(
-    const geometry::Mesh& mesh, const Eigen::Isometry3d& pose,
-    const geometry::CameraIntrinsics& intrinsics, const cv::Rect2i& roi) noexcept {
+    const geometry::Mesh& mesh, const Eigen::Isometry3d& pose, const geometry::Camera& camera,
+    const cv::Rect2i& roi) noexcept {
     auto buffer = cv::Mat{roi.height, roi.width, CV_32FC1, cv::Scalar{kNoDepth}};
     const Eigen::Matrix3f rotation = pose.linear().cast<float>();
     const Eigen::Vector3f translation = pose.translation().cast<float>();
-    const auto fx = static_cast<float>(intrinsics.fx);
-    const auto fy = static_cast<float>(intrinsics.fy);
-    const auto cx = static_cast<float>(intrinsics.cx);
-    const auto cy = static_cast<float>(intrinsics.cy);
+    const auto fx = static_cast<float>(camera.fx);
+    const auto fy = static_cast<float>(camera.fy);
+    const auto cx = static_cast<float>(camera.cx);
+    const auto cy = static_cast<float>(camera.cy);
     constexpr float kNearPlane = 0.01f;
     constexpr float kEdgeTolerance = 1e-4f;
 
@@ -103,17 +103,18 @@ cv::Mat rasterize_depth(
     };
 
     for (const auto& triangle : mesh.triangles) {
-        auto camera = std::array<Eigen::Vector3f, 3>{};
+        auto vertices = std::array<Eigen::Vector3f, 3>{};
         auto projected = std::array<Eigen::Vector2f, 3>{};
         auto visible = true;
         for (std::size_t k = 0; k < 3; k++) {
-            camera[k] = rotation * triangle[k] + translation;
-            if (camera[k].z() < kNearPlane) {
+            vertices[k] = rotation * triangle[k] + translation;
+            if (vertices[k].z() < kNearPlane) {
                 visible = false;
                 break;
             }
             projected[k] = {
-                fx * camera[k].x() / camera[k].z() + cx, fy * camera[k].y() / camera[k].z() + cy};
+                fx * vertices[k].x() / vertices[k].z() + cx,
+                fy * vertices[k].y() / vertices[k].z() + cy};
         }
         if (!visible)
             continue;
@@ -141,7 +142,8 @@ cv::Mat rasterize_depth(
                 if (w0 < -kEdgeTolerance || w1 < -kEdgeTolerance || w2 < -kEdgeTolerance)
                     continue;
                 // 透视下 1/z 在屏幕空间线性插值
-                const auto inverse_z = w0 / camera[0].z() + w1 / camera[1].z() + w2 / camera[2].z();
+                const auto inverse_z =
+                    w0 / vertices[0].z() + w1 / vertices[1].z() + w2 / vertices[2].z();
                 const auto z = 1.f / inverse_z;
                 auto& cell = row[u - roi.x];
                 cell = std::min(cell, z);
@@ -330,7 +332,7 @@ struct Registration::Impl {
         auto& quality = result.quality;
         quality.depth_checked = true;
 
-        const auto buffer = rasterize_depth(mesh, result.pose, view.intrinsics, view.roi);
+        const auto buffer = rasterize_depth(mesh, result.pose, view.camera, view.roi);
         auto silhouette = cv::Mat{};
         cv::compare(buffer, kNoDepth, silhouette, cv::CMP_LT);
         if (config.silhouette_erosion_px > 0) {
@@ -360,7 +362,8 @@ struct Registration::Impl {
                     continue;
                 }
                 valid++;
-                const auto difference = static_cast<float>(measured) * 1e-3f - model_row[u];
+                const auto difference =
+                    static_cast<float>(measured * view.camera.depth_scale) - model_row[u];
                 if (difference > config.depth_tolerance)
                     free_space++;
                 else if (difference < -config.depth_tolerance)
@@ -481,34 +484,33 @@ struct Registration::Impl {
     }
 
     std::optional<Result> register_depth(
-        const cv::Mat& depth, const geometry::CameraIntrinsics& intrinsics, const cv::Rect2i& roi,
+        const cv::Mat& depth, const geometry::Camera& camera, const cv::Rect2i& roi,
         const cv::Mat& mask) const noexcept {
         if (!initialized || depth.type() != CV_16UC1)
             return std::nullopt;
         const auto rect = roi & cv::Rect2i{0, 0, depth.cols, depth.rows};
         if (rect.empty())
             return std::nullopt;
-        const auto cloud = depth_to_cloud(depth, intrinsics, roi, mask, config);
+        const auto cloud = depth_to_cloud(depth, camera, roi, mask, config);
         // 掩码类型或尺寸不符时点云为空，preprocess 会因点数不足而拒绝
-        const auto view = DepthView{depth, intrinsics, rect, mask};
+        const auto view = DepthView{depth, camera, rect, mask};
         return register_scene(*cloud, &view);
     }
 };
 
 Registration::Cloud::Ptr Registration::depth_to_cloud(
-    const cv::Mat& depth, const geometry::CameraIntrinsics& intrinsics,
-    const cv::Rect2i& roi) noexcept {
-    return depth_to_cloud(depth, intrinsics, roi, cv::Mat{}, Config{});
+    const cv::Mat& depth, const geometry::Camera& camera, const cv::Rect2i& roi) noexcept {
+    return depth_to_cloud(depth, camera, roi, cv::Mat{}, Config{});
 }
 
 Registration::Cloud::Ptr Registration::depth_to_cloud(
-    const cv::Mat& depth, const geometry::CameraIntrinsics& intrinsics, const cv::Rect2i& roi,
+    const cv::Mat& depth, const geometry::Camera& camera, const cv::Rect2i& roi,
     const cv::Mat& mask) noexcept {
-    return depth_to_cloud(depth, intrinsics, roi, mask, Config{});
+    return depth_to_cloud(depth, camera, roi, mask, Config{});
 }
 
 Registration::Cloud::Ptr Registration::depth_to_cloud(
-    const cv::Mat& depth, const geometry::CameraIntrinsics& intrinsics, const cv::Rect2i& roi,
+    const cv::Mat& depth, const geometry::Camera& camera, const cv::Rect2i& roi,
     const cv::Mat& mask, const Config& config) noexcept {
     auto cloud = std::make_shared<Cloud>();
     if (depth.type() != CV_16UC1)
@@ -537,10 +539,10 @@ Registration::Cloud::Ptr Registration::depth_to_cloud(
                 continue;
             if (mask_row != nullptr && mask_row[u] == 0)
                 continue;
-            const auto z = static_cast<double>(row[u]) * 1e-3;
+            const auto z = static_cast<double>(row[u]) * camera.depth_scale;
             cloud->emplace_back(
-                static_cast<float>((u - intrinsics.cx) * z / intrinsics.fx),
-                static_cast<float>((v - intrinsics.cy) * z / intrinsics.fy), static_cast<float>(z));
+                static_cast<float>((u - camera.cx) * z / camera.fx),
+                static_cast<float>((v - camera.cy) * z / camera.fy), static_cast<float>(z));
         }
     }
     return cloud;
@@ -561,9 +563,9 @@ std::optional<Registration::Result>
 }
 
 std::optional<Registration::Result> Registration::register_depth(
-    const cv::Mat& depth, const geometry::CameraIntrinsics& intrinsics, const cv::Rect2i& roi,
+    const cv::Mat& depth, const geometry::Camera& camera, const cv::Rect2i& roi,
     const cv::Mat& mask) const noexcept {
-    return pimpl_->register_depth(depth, intrinsics, roi, mask);
+    return pimpl_->register_depth(depth, camera, roi, mask);
 }
 
 Registration::Registration() noexcept

@@ -24,7 +24,7 @@
 # error "RMCS_ENERGY_UNIT_MESH must be defined"
 #endif
 
-using rmcs_energy_trace::geometry::CameraIntrinsics;
+using rmcs_energy_trace::geometry::Camera;
 using rmcs_energy_trace::geometry::load_binary_stl;
 using rmcs_energy_trace::geometry::Mesh;
 using rmcs_energy_trace::registration::Registration;
@@ -34,7 +34,7 @@ namespace {
 
 constexpr int kWidth = 640;
 constexpr int kHeight = 480;
-constexpr CameraIntrinsics kIntrinsics{600., 600., 320., 240.};
+constexpr Camera kCamera{.width = kWidth, .height = kHeight};
 
 constexpr std::size_t kTrials = 50;
 // 抓取只依赖中心和长轴：绕长轴的滚转对称，两端认反则长轴夹角接近 180°
@@ -117,8 +117,7 @@ auto make_cylinder(float radius, float length) -> Mesh {
 
 auto make_renderer(const Mesh& mesh) -> std::unique_ptr<DepthRenderer> {
     auto renderer = std::make_unique<DepthRenderer>();
-    renderer->initialize(
-        mesh, DepthRenderer::Config{.width = kWidth, .height = kHeight, .intrinsics = kIntrinsics});
+    renderer->initialize(mesh, DepthRenderer::Config{.camera = kCamera});
     return renderer;
 }
 
@@ -217,7 +216,7 @@ auto run_trials(
     for (std::size_t i = 0; i < trials.size(); i++) {
         const auto& trial = trials[i];
         counts.trials++;
-        const auto result = registration.register_depth(trial.depth, kIntrinsics, trial.roi);
+        const auto result = registration.register_depth(trial.depth, kCamera, trial.roi);
         if (!result.has_value()) {
             counts.rejected++;
             std::println("[{}] #{:02} rejected", name, i);
@@ -258,8 +257,7 @@ auto run_negative_trials(
     auto accepted = std::size_t{};
     auto total_ms = std::vector<double>{};
     for (std::size_t i = 0; i < trials.size(); i++) {
-        const auto result =
-            registration.register_depth(trials[i].depth, kIntrinsics, trials[i].roi);
+        const auto result = registration.register_depth(trials[i].depth, kCamera, trials[i].roi);
         if (!result.has_value()) {
             std::println("[{}] #{:02} rejected", name, i);
             continue;

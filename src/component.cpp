@@ -5,6 +5,8 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rmcs_executor/component.hpp>
 
+#include "geometry/camera.hpp"
+
 namespace rmcs_energy_trace {
 
 // 能量单元位姿估计组件。
@@ -23,6 +25,16 @@ public:
         register_output("/energy_trace/pose", pose_, Eigen::Isometry3d::Identity());
 
         mesh_path_ = get_parameter_or<std::string>("mesh_path", "");
+        // 相机参数没有默认值：缺少时构造失败，避免用错误的内参静默运行
+        camera_ = geometry::Camera{
+            .width = static_cast<int>(get_parameter("camera.width").as_int()),
+            .height = static_cast<int>(get_parameter("camera.height").as_int()),
+            .fx = get_parameter("camera.fx").as_double(),
+            .fy = get_parameter("camera.fy").as_double(),
+            .cx = get_parameter("camera.cx").as_double(),
+            .cy = get_parameter("camera.cy").as_double(),
+            .depth_scale = get_parameter("camera.depth_scale").as_double(),
+        };
         RCLCPP_INFO(
             get_logger(), "energy trace component created, mesh_path='%s'", mesh_path_.c_str());
     }
@@ -37,6 +49,7 @@ private:
     OutputInterface<Eigen::Isometry3d> pose_;
 
     std::string mesh_path_;
+    geometry::Camera camera_;
 };
 
 } // namespace rmcs_energy_trace

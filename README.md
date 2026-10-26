@@ -47,7 +47,7 @@ rmcs_energy_trace/
 │   │
 │   ├── geometry/                  各模块共用的几何类型
 │   │   ├── mesh.hpp/.cpp          读取二进制 STL（mm 转 m，原点移到中心），在表面均匀采样
-│   │   └── camera.hpp             CameraIntrinsics：针孔相机内参
+│   │   └── camera.hpp             Camera：RGB-D 相机的分辨率、内参和深度单位
 │   │
 │   ├── synthetic/                 合成数据，只供测试和离线工具使用
 │   │   └── depth_renderer.xpp     按给定位姿渲染深度图、彩色图和实例编号图
@@ -212,9 +212,17 @@ rmcs_executor:
 energy_trace:
   ros__parameters:
     mesh_path: ""
+    camera:
+      width: 640
+      height: 480
+      fx: 600.0
+      fy: 600.0
+      cx: 320.0
+      cy: 240.0
+      depth_scale: 0.001
 ```
 
-参数说明见 `config/energy_trace.yaml`。
+`camera` 下的参数没有默认值，缺少时组件构造失败。深度图必须已对齐到彩色图：两者分辨率相同、共用这组内参。参数说明见 `config/energy_trace.yaml`。
 
 ## 参考
 

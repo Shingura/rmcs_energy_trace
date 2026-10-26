@@ -84,7 +84,7 @@ struct Tracker::Impl {
     [[nodiscard]] std::expected<void, std::string>
         check_images(const cv::Mat& bgr, const cv::Mat& depth) const {
         const auto size_ok = [&](const cv::Mat& image) {
-            return image.cols == config.width && image.rows == config.height;
+            return image.cols == config.camera.width && image.rows == config.camera.height;
         };
         if (config.use_region && (bgr.type() != CV_8UC3 || !size_ok(bgr)))
             return std::unexpected{"Color image must be CV_8UC3 and match the configured size"};
@@ -124,16 +124,17 @@ struct Tracker::Impl {
                     path.string())};
         }
 
-        const auto& k = config.intrinsics;
+        const auto& k = config.camera;
         const auto intrinsics = m3t::Intrinsics{
             static_cast<float>(k.fx),
             static_cast<float>(k.fy),
             static_cast<float>(k.cx),
             static_cast<float>(k.cy),
-            config.width,
-            config.height};
+            k.width,
+            k.height};
         color_camera = std::make_shared<MemoryColorCamera>("color", intrinsics);
-        depth_camera = std::make_shared<MemoryDepthCamera>("depth", intrinsics, config.depth_scale);
+        depth_camera = std::make_shared<MemoryDepthCamera>(
+            "depth", intrinsics, static_cast<float>(k.depth_scale));
         color_camera->SetUp();
         depth_camera->SetUp();
 

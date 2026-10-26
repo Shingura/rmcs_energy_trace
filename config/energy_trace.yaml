@@ -10,3 +10,15 @@ energy_trace:
   ros__parameters:
     # 能量单元 3D 模型（STL，单位 mm），留空时使用包内的 meshes/energy_unit.stl
     mesh_path: ""
+
+    # RGB-D 相机参数，标定后修改。下面是示例值。
+    # 深度图必须已对齐到彩色图：两者分辨率相同、共用这组内参
+    camera:
+      width: 640
+      height: 480
+      fx: 600.0
+      fy: 600.0
+      cx: 320.0
+      cy: 240.0
+      # 深度图每个单位对应的米数，毫米深度图为 0.001
+      depth_scale: 0.001

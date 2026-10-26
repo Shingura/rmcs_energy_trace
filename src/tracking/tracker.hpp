@@ -26,11 +26,8 @@ public:
         // 生成模型时使用的参数
         ModelParams model_params;
 
-        int width = 640;
-        int height = 480;
-        geometry::CameraIntrinsics intrinsics{600., 600., 320., 240.};
-        // 深度图单位对应的米数，默认 CV_16UC1 毫米
-        float depth_scale = 0.001f;
+        // 彩色图和深度图共用这组参数（深度图已对齐到彩色图）
+        geometry::Camera camera;
 
         // 区域线索使用彩色图，深度线索使用深度图，至少启用一个
         bool use_region = true;
@@ -57,7 +54,7 @@ public:
     std::expected<void, std::string>
         start(const Eigen::Isometry3d& pose, const cv::Mat& bgr, const cv::Mat& depth) noexcept;
 
-    // 处理下一帧。bgr 为 CV_8UC3，depth 为 CV_16UC1（与 depth_scale 配套）。
+    // 处理下一帧。bgr 为 CV_8UC3，depth 为 CV_16UC1（单位见 camera.depth_scale）。
     // 未调用 start、图像格式或尺寸不符、M3T 执行失败时返回空
     std::optional<Result> track(const cv::Mat& bgr, const cv::Mat& depth) noexcept;
 
