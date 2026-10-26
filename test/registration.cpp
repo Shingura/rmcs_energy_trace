@@ -48,6 +48,8 @@ constexpr std::size_t kMaxWrongAccepts = 1;
 constexpr std::size_t kNegativeTrials = 30;
 // 反例（错误物体）被接受的数量上限
 constexpr std::size_t kMaxNegativeAccepts = 0;
+// 带掩码的两组测试的试验数
+constexpr std::size_t kMaskTrials = 20;
 // 部分视野：ROI 只保留物体包围盒宽度的这个比例
 constexpr double kPartialWidthFraction = 0.6;
 
@@ -55,6 +57,7 @@ struct Trial {
     Eigen::Isometry3d pose;
     cv::Mat depth;
     cv::Rect2i roi;
+    cv::Mat mask; // 精确的实例掩码；只在带掩码的测试中使用
 };
 
 auto median(std::vector<double> values) -> double {
@@ -139,7 +142,7 @@ auto make_trials_a(const DepthRenderer& renderer, std::uint32_t seed, std::size_
         pose.linear() = random_rotation(engine);
         pose.translation() = center;
         const auto frame = renderer.render(pose, engine, std::nullopt);
-        trials.push_back({pose, frame.depth, frame.roi});
+        trials.push_back({pose, frame.depth, frame.roi, frame.mask});
     }
     return trials;
 }
@@ -179,7 +182,7 @@ auto make_trials_b(
         const Eigen::Vector3d up = world_to_camera * Eigen::Vector3d::UnitZ();
         const auto frame =
             renderer.render(pose, engine, DepthRenderer::Plane{up, center - ground_offset * up});
-        trials.push_back({pose, frame.depth, frame.roi});
+        trials.push_back({pose, frame.depth, frame.roi, frame.mask});
     }
     return trials;
 }
@@ -198,6 +201,30 @@ auto cut_roi(std::vector<Trial> trials, std::uint32_t seed) -> std::vector<Trial
     return trials;
 }
 
+// 在 B 场景的目标前方 10 cm 处放一根竖直细杆（半径 12 mm），横向偏 2 cm，挡住目标约三分之一。
+// 掩码只含目标的可见像素；检测框取目标单独渲染时的框。地面按 B 场景的约定由位姿推出
+auto occlude(
+    const DepthRenderer& renderer, std::size_t rod, std::vector<Trial> trials, double ground_offset,
+    std::uint32_t seed) -> std::vector<Trial> {
+    // NOLINTNEXTLINE(cert-msc51-cpp): 固定种子保证测试可复现
+    auto engine = std::mt19937{seed};
+    for (auto& trial : trials) {
+        const Eigen::Vector3d center = trial.pose.translation();
+        auto rod_pose = Eigen::Isometry3d::Identity();
+        rod_pose.linear() =
+            Eigen::AngleAxisd{std::numbers::pi / 2, Eigen::Vector3d::UnitX()}.toRotationMatrix();
+        rod_pose.translation() =
+            center * (1. - 0.10 / center.norm()) + Eigen::Vector3d{0.02, 0., 0.};
+        const Eigen::Vector3d up = trial.pose.linear().col(2);
+        const auto scene = renderer.render_scene(
+            {DepthRenderer::Object{0, trial.pose}, DepthRenderer::Object{rod, rod_pose}}, engine,
+            DepthRenderer::Plane{up, center - ground_offset * up});
+        trial.depth = scene.depth;
+        trial.mask = scene.instance == 1;
+    }
+    return trials;
+}
+
 struct Counts {
     std::size_t trials = 0;
     std::size_t success = 0;        // 被接受且中心、长轴都达标
@@ -205,10 +232,11 @@ struct Counts {
     std::size_t accepted_wrong = 0; // 被接受但中心或长轴不达标
 };
 
-// 逐个配准并打印。每行只含由输入决定的内容，耗时单独成行，便于比较不同运行顺序的输出
+// 逐个配准并打印。每行只含由输入决定的内容，耗时单独成行，便于比较不同运行顺序的输出。
+// with_mask 为 true 时同时传入精确的实例掩码
 auto run_trials(
-    const Registration& registration, const char* name, const std::vector<Trial>& trials)
-    -> Counts {
+    const Registration& registration, const char* name, const std::vector<Trial>& trials,
+    bool with_mask = false) -> Counts {
     auto counts = Counts{};
     auto total_ms = std::vector<double>{}, quality_ms = std::vector<double>{};
     auto timing_lines = std::string{};
@@ -216,7 +244,8 @@ auto run_trials(
     for (std::size_t i = 0; i < trials.size(); i++) {
         const auto& trial = trials[i];
         counts.trials++;
-        const auto result = registration.register_depth(trial.depth, kCamera, trial.roi);
+        const auto mask = with_mask ? trial.mask : cv::Mat{};
+        const auto result = registration.register_depth(trial.depth, kCamera, trial.roi, mask);
         if (!result.has_value()) {
             counts.rejected++;
             std::println("[{}] #{:02} rejected", name, i);
@@ -252,12 +281,14 @@ auto run_trials(
 }
 
 auto run_negative_trials(
-    const Registration& registration, const char* name, const std::vector<Trial>& trials)
-    -> std::size_t {
+    const Registration& registration, const char* name, const std::vector<Trial>& trials,
+    bool with_mask = false) -> std::size_t {
     auto accepted = std::size_t{};
     auto total_ms = std::vector<double>{};
     for (std::size_t i = 0; i < trials.size(); i++) {
-        const auto result = registration.register_depth(trials[i].depth, kCamera, trials[i].roi);
+        const auto mask = with_mask ? trials[i].mask : cv::Mat{};
+        const auto result =
+            registration.register_depth(trials[i].depth, kCamera, trials[i].roi, mask);
         if (!result.has_value()) {
             std::println("[{}] #{:02} rejected", name, i);
             continue;
@@ -332,6 +363,30 @@ TEST_F(RegistrationTest, RejectsCylinder) {
     const auto upright = make_trials_b(*renderer, 7002, kNegativeTrials / 2, half_length(cylinder));
     trials.insert(trials.end(), upright.begin(), upright.end());
     EXPECT_LE(run_negative_trials(*registration_, "cylinder", trials), kMaxNegativeAccepts);
+}
+
+// 带掩码：目标被前方的细杆挡住约三分之一。挡住目标的像素在掩码外，不应影响验收
+TEST_F(RegistrationTest, OccludedWithMask) {
+    auto renderer = make_renderer(*mesh_);
+    const auto rod = renderer->add_mesh(make_cylinder(0.012f, 0.30f));
+    const auto offset = half_length(*mesh_);
+    const auto trials =
+        occlude(*renderer, rod, make_trials_b(*renderer, 9001, kMaskTrials, offset), offset, 9101);
+    expect_positive("occluded", run_trials(*registration_, "occluded", trials, true));
+}
+
+// 0.9 倍的物体只用检测框时偶尔会被接受：视线接近长轴时，把 mesh 沿长轴往后挪几毫米，
+// 大部分像素仍在深度容差内。加上精确掩码后，被接受的次数不能比只用检测框时多：
+// mesh 超出掩码、落在背景上的部分必须作为违例统计
+TEST_F(RegistrationTest, MaskDoesNotWeakenRejection) {
+    const auto small = scaled(*mesh_, 0.9f);
+    const auto renderer = make_renderer(small);
+    auto trials = make_trials_a(*renderer, 6001, kMaskTrials / 2);
+    const auto upright = make_trials_b(*renderer, 6002, kMaskTrials / 2, half_length(small));
+    trials.insert(trials.end(), upright.begin(), upright.end());
+    const auto box_only = run_negative_trials(*registration_, "scaled0.9", trials);
+    const auto masked = run_negative_trials(*registration_, "scaled0.9+mask", trials, true);
+    EXPECT_LE(masked, box_only);
 }
 
 // 部分视野：ROI 只框住物体宽度的 60%。结果要么正确，要么被拒绝，不能被接受而错误

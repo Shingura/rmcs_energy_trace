@@ -327,7 +327,9 @@ struct Registration::Impl {
         result.pose = Eigen::Isometry3d{Eigen::Matrix4d{model_to_scene.cast<double>()}};
     }
 
-    // 把 mesh 渲染到候选位姿，与实测深度逐像素比较
+    // 把 mesh 渲染到候选位姿，与实测深度逐像素比较。
+    // 掩码只决定一个像素能否算作支持：掩码外是别的东西，深度相同或更近都说明不了位姿对错，
+    // 不统计；但掩码外看到比 mesh 更远的背景，说明 mesh 所在处是空的，仍记为违例
     void assess(const DepthView& view, Result& result) const noexcept {
         auto& quality = result.quality;
         quality.depth_checked = true;
@@ -353,23 +355,24 @@ struct Registration::Impl {
             for (int u = 0; u < view.roi.width; u++) {
                 if (silhouette_row[u] == 0)
                     continue;
-                if (mask_row != nullptr && mask_row[u + view.roi.x] == 0)
-                    continue;
-                quality.model_pixels++;
+                const auto in_mask = mask_row == nullptr || mask_row[u + view.roi.x] != 0;
                 const auto measured = depth_row[u + view.roi.x];
-                if (measured == 0) {
-                    missing++;
-                    continue;
+                if (in_mask) {
+                    quality.model_pixels++;
+                    if (measured == 0)
+                        missing++;
                 }
-                valid++;
+                if (measured == 0)
+                    continue;
                 const auto difference =
                     static_cast<float>(measured * view.camera.depth_scale) - model_row[u];
-                if (difference > config.depth_tolerance)
+                if (difference > config.depth_tolerance) {
                     free_space++;
-                else if (difference < -config.depth_tolerance)
-                    occluded++;
-                else
-                    supported++;
+                    valid++;
+                } else if (in_mask) {
+                    valid++;
+                    difference < -config.depth_tolerance ? occluded++ : supported++;
+                }
             }
         }
         if (quality.model_pixels > 0) {

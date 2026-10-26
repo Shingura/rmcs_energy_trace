@@ -215,7 +215,7 @@ struct DepthRenderer::Impl {
         roi = cv::Rect2i{roi.x - dx, roi.y - dy, roi.width + 2 * dx, roi.height + 2 * dy}
             & cv::Rect2i{0, 0, config.camera.width, config.camera.height};
 
-        return Frame{scene.depth, roi, scene.color};
+        return Frame{scene.depth, roi, scene.instance != 0, scene.color};
     }
 };
 

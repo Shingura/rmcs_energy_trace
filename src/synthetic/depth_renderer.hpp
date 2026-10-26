@@ -65,6 +65,7 @@ public:
     struct Frame {
         cv::Mat depth;  // CV_16UC1，单位见 camera.depth_scale，0 为无效
         cv::Rect2i roi; // 物体投影包围盒外扩
+        cv::Mat mask;   // CV_8UC1，物体可见的像素为 255，即精确的实例掩码
         cv::Mat color;  // CV_8UC3 BGR，未配置 Config::color 时为空
     };
 
