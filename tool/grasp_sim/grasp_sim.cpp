@@ -306,11 +306,10 @@ private:
 
         build_cloud_message(frame.depth);
 
-        const auto roi_cloud = registration::Registration::depth_to_cloud(
-            frame.depth, render_config_.intrinsics, frame.roi);
-        const auto result = registration_.register_cloud(*roi_cloud);
+        const auto result =
+            registration_.register_depth(frame.depth, render_config_.intrinsics, frame.roi);
         if (!result.has_value()) {
-            RCLCPP_ERROR(logger_, "registration failed (roi cloud %zu points)", roi_cloud->size());
+            RCLCPP_ERROR(logger_, "registration failed or rejected by quality check");
             set_text("registration failed");
             return false;
         }

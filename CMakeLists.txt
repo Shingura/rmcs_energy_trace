@@ -197,7 +197,7 @@ if(BUILD_TESTING)
   target_compile_definitions(test_registration PRIVATE
     RMCS_ENERGY_UNIT_MESH="${PROJECT_SOURCE_DIR}/meshes/energy_unit.stl"
   )
-  set_tests_properties(test_registration PROPERTIES TIMEOUT 300)
+  set_tests_properties(test_registration PROPERTIES TIMEOUT 900)
 
   ament_add_gtest(test_tracking test/tracking.cpp)
   target_link_libraries(test_tracking ${PROJECT_NAME})

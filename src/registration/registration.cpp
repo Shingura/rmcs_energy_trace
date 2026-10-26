@@ -1,8 +1,12 @@
 #include "registration/registration.hpp"
 
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <limits>
 #include <memory>
 
 #include <opencv2/imgproc.hpp>
@@ -68,12 +72,92 @@ pcl::PointCloud<pcl::Normal>::Ptr compute_normals(const Cloud::Ptr& cloud, float
     return normals;
 }
 
+constexpr float kNoDepth = std::numeric_limits<float>::max();
+
+// 评价候选位姿所需的实测深度
+struct DepthView {
+    const cv::Mat& depth;
+    const geometry::CameraIntrinsics& intrinsics;
+    cv::Rect2i roi;      // 已与图像求交
+    const cv::Mat& mask; // 空表示不限制
+};
+
+// 把 mesh 的三角形按位姿 (mesh -> camera) 光栅化为 roi 内的 z-buffer (m)，
+// 无覆盖处为 kNoDepth。像素 (u, v) 的中心位于投影坐标 (u, v)，与 depth_to_cloud 一致
+cv::Mat rasterize_depth(
+    const geometry::Mesh& mesh, const Eigen::Isometry3d& pose,
+    const geometry::CameraIntrinsics& intrinsics, const cv::Rect2i& roi) noexcept {
+    auto buffer = cv::Mat{roi.height, roi.width, CV_32FC1, cv::Scalar{kNoDepth}};
+    const Eigen::Matrix3f rotation = pose.linear().cast<float>();
+    const Eigen::Vector3f translation = pose.translation().cast<float>();
+    const auto fx = static_cast<float>(intrinsics.fx);
+    const auto fy = static_cast<float>(intrinsics.fy);
+    const auto cx = static_cast<float>(intrinsics.cx);
+    const auto cy = static_cast<float>(intrinsics.cy);
+    constexpr float kNearPlane = 0.01f;
+    constexpr float kEdgeTolerance = 1e-4f;
+
+    const auto edge = [](const Eigen::Vector2f& a, const Eigen::Vector2f& b,
+                         const Eigen::Vector2f& c) {
+        return (b.x() - a.x()) * (c.y() - a.y()) - (b.y() - a.y()) * (c.x() - a.x());
+    };
+
+    for (const auto& triangle : mesh.triangles) {
+        auto camera = std::array<Eigen::Vector3f, 3>{};
+        auto projected = std::array<Eigen::Vector2f, 3>{};
+        auto visible = true;
+        for (std::size_t k = 0; k < 3; k++) {
+            camera[k] = rotation * triangle[k] + translation;
+            if (camera[k].z() < kNearPlane) {
+                visible = false;
+                break;
+            }
+            projected[k] = {
+                fx * camera[k].x() / camera[k].z() + cx, fy * camera[k].y() / camera[k].z() + cy};
+        }
+        if (!visible)
+            continue;
+
+        const auto area = edge(projected[0], projected[1], projected[2]);
+        if (std::abs(area) < 1e-9f)
+            continue;
+
+        const auto lo_x = std::min({projected[0].x(), projected[1].x(), projected[2].x()});
+        const auto hi_x = std::max({projected[0].x(), projected[1].x(), projected[2].x()});
+        const auto lo_y = std::min({projected[0].y(), projected[1].y(), projected[2].y()});
+        const auto hi_y = std::max({projected[0].y(), projected[1].y(), projected[2].y()});
+        const auto x0 = std::max(roi.x, static_cast<int>(std::ceil(lo_x)));
+        const auto x1 = std::min(roi.x + roi.width - 1, static_cast<int>(std::floor(hi_x)));
+        const auto y0 = std::max(roi.y, static_cast<int>(std::ceil(lo_y)));
+        const auto y1 = std::min(roi.y + roi.height - 1, static_cast<int>(std::floor(hi_y)));
+
+        for (int v = y0; v <= y1; v++) {
+            auto* row = buffer.ptr<float>(v - roi.y);
+            for (int u = x0; u <= x1; u++) {
+                const Eigen::Vector2f pixel{static_cast<float>(u), static_cast<float>(v)};
+                const auto w0 = edge(projected[1], projected[2], pixel) / area;
+                const auto w1 = edge(projected[2], projected[0], pixel) / area;
+                const auto w2 = 1.f - w0 - w1;
+                if (w0 < -kEdgeTolerance || w1 < -kEdgeTolerance || w2 < -kEdgeTolerance)
+                    continue;
+                // 透视下 1/z 在屏幕空间线性插值
+                const auto inverse_z = w0 / camera[0].z() + w1 / camera[1].z() + w2 / camera[2].z();
+                const auto z = 1.f / inverse_z;
+                auto& cell = row[u - roi.x];
+                cell = std::min(cell, z);
+            }
+        }
+    }
+    return buffer;
+}
+
 } // namespace
 
 struct Registration::Impl {
     Config config;
     bool initialized = false;
 
+    geometry::Mesh mesh;
     Cloud::Ptr model_cloud;
     pcl::PointCloud<pcl::Normal>::Ptr model_normals;
     Fpfh::Ptr model_features;
@@ -85,11 +169,12 @@ struct Registration::Impl {
         initialize(const std::string& stl_path, const Config& new_config) noexcept {
         config = new_config;
 
-        auto mesh = geometry::load_binary_stl(stl_path);
-        if (!mesh.has_value())
-            return std::unexpected{mesh.error()};
+        auto loaded = geometry::load_binary_stl(stl_path);
+        if (!loaded.has_value())
+            return std::unexpected{loaded.error()};
+        mesh = std::move(*loaded);
 
-        const auto sampled = geometry::sample_surface(*mesh, config.model_sample_count, 42);
+        const auto sampled = geometry::sample_surface(mesh, config.model_sample_count, 42);
 
         // 体素下采样 PointNormal，体素内法线取平均后归一化
         const auto downsample = [&](float leaf) {
@@ -170,8 +255,8 @@ struct Registration::Impl {
     }
 
     // FPFH + SampleConsensusPrerejective，返回 scene -> model
-    std::optional<Eigen::Matrix4f>
-        coarse_align(const Cloud::Ptr& scene, const Fpfh::Ptr& features) const noexcept {
+    std::optional<Eigen::Matrix4f> coarse_align(
+        const Cloud::Ptr& scene, const Fpfh::Ptr& features, int attempt) const noexcept {
         auto coarse =
             pcl::SampleConsensusPrerejective<pcl::PointXYZ, pcl::PointXYZ, pcl::FPFHSignature33>{};
         coarse.setInputSource(scene);
@@ -185,6 +270,8 @@ struct Registration::Impl {
         coarse.setMaxCorrespondenceDistance(config.ransac_inlier_threshold);
         coarse.setInlierFraction(config.ransac_inlier_fraction);
         auto aligned = Cloud{};
+        // PCL 用全局 rand() 取样，这里固定种子使结果与调用顺序无关
+        std::srand(config.seed + static_cast<unsigned>(attempt));
         coarse.align(aligned);
         if (!coarse.hasConverged())
             return std::nullopt;
@@ -225,27 +312,109 @@ struct Registration::Impl {
     void evaluate(const Cloud::Ptr& scene, const Eigen::Matrix4f& scene_to_model, Result& result)
         const noexcept {
         auto inliers = std::size_t{};
-        auto sum_sq = 0.;
         auto indices = std::vector<int>(1);
         auto dists = std::vector<float>(1);
         for (const auto& point : *scene) {
             const Eigen::Vector3f p = (scene_to_model * point.getVector4fMap()).head<3>();
             refine_tree.nearestKSearch(pcl::PointXYZ{p.x(), p.y(), p.z()}, 1, indices, dists);
-            if (dists[0] < config.inlier_distance * config.inlier_distance) {
+            if (dists[0] < config.inlier_distance * config.inlier_distance)
                 inliers++;
-                sum_sq += dists[0];
-            }
         }
         result.inlier_ratio = static_cast<double>(inliers) / static_cast<double>(scene->size());
-        result.fitness = inliers == 0 ? 1e9 : sum_sq / static_cast<double>(inliers);
+        result.quality.scene_coverage = result.inlier_ratio;
 
         const Eigen::Matrix4f model_to_scene = scene_to_model.inverse();
         result.pose = Eigen::Isometry3d{Eigen::Matrix4d{model_to_scene.cast<double>()}};
     }
 
-    // 以场景为 source、模型为 target：场景点必然能在完整模型上找到对应。
-    // 对称/近对称物体的单次 RANSAC 可能落入错误盆地，故多次尝试取内点率最高者。
-    bool align(const Cloud::Ptr& scene, Result& result) const noexcept {
+    // 把 mesh 渲染到候选位姿，与实测深度逐像素比较
+    void assess(const DepthView& view, Result& result) const noexcept {
+        auto& quality = result.quality;
+        quality.depth_checked = true;
+
+        const auto buffer = rasterize_depth(mesh, result.pose, view.intrinsics, view.roi);
+        auto silhouette = cv::Mat{};
+        cv::compare(buffer, kNoDepth, silhouette, cv::CMP_LT);
+        if (config.silhouette_erosion_px > 0) {
+            const auto size = 2 * config.silhouette_erosion_px + 1;
+            cv::erode(
+                silhouette, silhouette,
+                cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size{size, size}));
+        }
+
+        auto valid = std::size_t{}, supported = std::size_t{}, free_space = std::size_t{},
+             occluded = std::size_t{}, missing = std::size_t{};
+        for (int v = 0; v < view.roi.height; v++) {
+            const auto* model_row = buffer.ptr<float>(v);
+            const auto* silhouette_row = silhouette.ptr<std::uint8_t>(v);
+            const auto* depth_row = view.depth.ptr<std::uint16_t>(v + view.roi.y);
+            const auto* mask_row =
+                view.mask.empty() ? nullptr : view.mask.ptr<std::uint8_t>(v + view.roi.y);
+            for (int u = 0; u < view.roi.width; u++) {
+                if (silhouette_row[u] == 0)
+                    continue;
+                if (mask_row != nullptr && mask_row[u + view.roi.x] == 0)
+                    continue;
+                quality.model_pixels++;
+                const auto measured = depth_row[u + view.roi.x];
+                if (measured == 0) {
+                    missing++;
+                    continue;
+                }
+                valid++;
+                const auto difference = static_cast<float>(measured) * 1e-3f - model_row[u];
+                if (difference > config.depth_tolerance)
+                    free_space++;
+                else if (difference < -config.depth_tolerance)
+                    occluded++;
+                else
+                    supported++;
+            }
+        }
+        if (quality.model_pixels > 0) {
+            quality.missing_ratio =
+                static_cast<double>(missing) / static_cast<double>(quality.model_pixels);
+        }
+        if (valid > 0) {
+            const auto count = static_cast<double>(valid);
+            quality.support_ratio = static_cast<double>(supported) / count;
+            quality.free_space_ratio = static_cast<double>(free_space) / count;
+            quality.occluded_ratio = static_cast<double>(occluded) / count;
+        }
+    }
+
+    bool acceptable(const Result& candidate) const noexcept {
+        if (candidate.inlier_ratio < config.min_inlier_ratio)
+            return false;
+        const auto& quality = candidate.quality;
+        if (!quality.depth_checked)
+            return true;
+        return quality.model_pixels >= config.min_model_pixels
+            && quality.support_ratio >= config.min_support_ratio
+            && quality.free_space_ratio <= config.max_free_space_ratio;
+    }
+
+    // 候选之间的比较分数：场景被 mesh 解释得越多、mesh 被场景支持得越多、空闲空间违例越少越好
+    static double score(const Result& candidate) noexcept {
+        const auto& quality = candidate.quality;
+        if (!quality.depth_checked)
+            return candidate.inlier_ratio;
+        return candidate.inlier_ratio + quality.support_ratio - 2. * quality.free_space_ratio;
+    }
+
+    bool good_enough_to_stop(const Result& candidate) const noexcept {
+        if (!acceptable(candidate) || candidate.inlier_ratio < config.early_stop_inlier_ratio)
+            return false;
+        const auto& quality = candidate.quality;
+        return !quality.depth_checked
+            || (quality.support_ratio >= config.early_stop_support_ratio
+                && quality.free_space_ratio <= config.early_stop_free_space_ratio);
+    }
+
+    // 以场景为 source、mesh 为 target：场景点必然能在完整 mesh 上找到对应。
+    // 对称/近对称物体的单次 RANSAC 可能落入错误盆地，故多次尝试，取 score 最高者；
+    // 只有候选已通过验收并且各项指标都很高时才提前结束
+    bool align(const Cloud::Ptr& scene, const DepthView* view, Result& result) const noexcept {
         auto stage = Clock::now();
         const auto normals = compute_normals(scene, config.normal_radius);
         const auto features = compute_fpfh(scene, normals, config.feature_radius);
@@ -255,10 +424,11 @@ struct Registration::Impl {
         auto failures = 0;
         for (int attempt = 0; attempt < config.coarse_attempts; attempt++) {
             stage = Clock::now();
-            const auto coarse = coarse_align(scene, features);
+            const auto coarse = coarse_align(scene, features, attempt);
             result.timing.coarse_ms += elapsed_ms(stage);
             if (!coarse.has_value()) {
-                // 连续无法找到满足内点比例的假设，说明该场景候选不含完整物体（如混有地面）
+                // 累计无法找到满足内点比例的假设，说明该场景候选不含完整物体（如混有地面）。
+                // 用累计而非连续计数：正确的候选几乎每次都收敛，没必要在失败后继续碰运气
                 if (++failures >= config.coarse_max_failures)
                     break;
                 continue;
@@ -270,25 +440,26 @@ struct Registration::Impl {
 
             auto candidate = Result{};
             evaluate(scene, refined, candidate);
-            if (!best.has_value() || candidate.inlier_ratio > best->inlier_ratio)
+            if (view != nullptr) {
+                stage = Clock::now();
+                assess(*view, candidate);
+                result.timing.quality_ms += elapsed_ms(stage);
+            }
+            if (!best.has_value() || score(candidate) > score(*best))
                 best = candidate;
-            if (best->inlier_ratio >= config.early_stop_inlier_ratio)
+            if (good_enough_to_stop(*best))
                 break;
         }
-        if (!best.has_value())
-            return false;
-        if (best->inlier_ratio < config.min_inlier_ratio)
-            return false;
-        if (best->fitness > config.max_fitness)
+        if (!best.has_value() || !acceptable(*best))
             return false;
 
         result.pose = best->pose;
         result.inlier_ratio = best->inlier_ratio;
-        result.fitness = best->fitness;
+        result.quality = best->quality;
         return true;
     }
 
-    std::optional<Result> register_cloud(const Cloud& scene) const noexcept {
+    std::optional<Result> register_scene(const Cloud& scene, const DepthView* view) const noexcept {
         if (!initialized)
             return std::nullopt;
 
@@ -299,12 +470,30 @@ struct Registration::Impl {
         result.timing.preprocess_ms = elapsed_ms(begin);
 
         for (const auto& candidate : candidates) {
-            if (align(candidate, result)) {
+            if (align(candidate, view, result)) {
                 result.timing.total_ms = elapsed_ms(begin);
                 return result;
             }
         }
         return std::nullopt;
+    }
+
+    std::optional<Result> register_cloud(const Cloud& scene) const noexcept {
+        return register_scene(scene, nullptr);
+    }
+
+    std::optional<Result> register_depth(
+        const cv::Mat& depth, const geometry::CameraIntrinsics& intrinsics, const cv::Rect2i& roi,
+        const cv::Mat& mask) const noexcept {
+        if (!initialized || depth.type() != CV_16UC1)
+            return std::nullopt;
+        const auto rect = roi & cv::Rect2i{0, 0, depth.cols, depth.rows};
+        if (rect.empty())
+            return std::nullopt;
+        const auto cloud = depth_to_cloud(depth, intrinsics, roi, mask, config);
+        // 掩码类型或尺寸不符时点云为空，preprocess 会因点数不足而拒绝
+        const auto view = DepthView{depth, intrinsics, rect, mask};
+        return register_scene(*cloud, &view);
     }
 };
 
@@ -371,6 +560,12 @@ std::expected<void, std::string> Registration::initialize(const std::string& stl
 std::optional<Registration::Result>
     Registration::register_cloud(const Cloud& scene) const noexcept {
     return pimpl_->register_cloud(scene);
+}
+
+std::optional<Registration::Result> Registration::register_depth(
+    const cv::Mat& depth, const geometry::CameraIntrinsics& intrinsics, const cv::Rect2i& roi,
+    const cv::Mat& mask) const noexcept {
+    return pimpl_->register_depth(depth, intrinsics, roi, mask);
 }
 
 Registration::Registration() noexcept

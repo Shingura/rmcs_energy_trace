@@ -45,8 +45,8 @@ constexpr int kWidth = 640;
 constexpr int kHeight = 480;
 constexpr CameraIntrinsics kIntrinsics{600., 600., 320., 240.};
 
-// 与测试 B 一致：地面在目标中心之下 0.0725 m
-constexpr double kGroundOffset = 0.0725;
+// 与测试 B 一致：地面在目标中心之下半个物体长度 (m)，物体恰好落在地面上
+constexpr double kGroundOffset = 0.075;
 constexpr double kRoiMargin = 0.1;
 constexpr double kCenterThresholdMm = 3.;
 constexpr double kAxisThresholdDeg = 2.;
@@ -312,6 +312,7 @@ struct Stats {
     std::size_t trials = 0;
     std::size_t success = 0;
     std::size_t none = 0;
+    std::size_t wrong = 0;
     std::vector<double> center, axis, time;
 
     explicit Stats(std::string label)
@@ -328,14 +329,17 @@ struct Stats {
         axis.push_back(outcome.axis_deg);
         if (outcome.center_mm < kCenterThresholdMm && outcome.axis_deg < kAxisThresholdDeg)
             success++;
+        else
+            wrong++;
     }
 };
 
 auto run_registration(
-    const Registration& registration, const Registration::Cloud& cloud,
-    const Eigen::Isometry3d& truth, Clock::time_point begin) -> Outcome {
+    const Registration& registration, const cv::Mat& depth, const cv::Rect2i& box,
+    const cv::Mat& mask, const Eigen::Isometry3d& truth) -> Outcome {
     auto outcome = Outcome{};
-    const auto result = registration.register_cloud(cloud);
+    const auto begin = Clock::now();
+    const auto result = registration.register_depth(depth, kIntrinsics, box, mask);
     outcome.time_ms = std::chrono::duration<double, std::milli>{Clock::now() - begin}.count();
     if (!result.has_value())
         return outcome;
@@ -362,11 +366,12 @@ void print_row(const Stats& stats) {
         return std::format("{:.2f}", use_max ? *std::ranges::max_element(values) : median(values));
     };
     std::println(
-        "| {:<30} | {:>3}/{:<3} ({:>3.0f}%) | {:>7} | {:>7} | {:>7} | {:>7} | {:>9} | {:>9} |",
+        "| {:<30} | {:>3}/{:<3} ({:>3.0f}%) | {:>8} | {:>7} | {:>7} | {:>7} | {:>7} | {:>9} |",
         stats.name, stats.success, stats.trials,
         100. * static_cast<double>(stats.success) / static_cast<double>(stats.trials),
-        text(stats.center, false), text(stats.center, true), text(stats.axis, false),
-        text(stats.axis, true), stats.none, std::format("{:.0f}", median(stats.time)));
+        std::format("{}/{}", stats.none, stats.wrong), text(stats.center, false),
+        text(stats.center, true), text(stats.axis, false), text(stats.axis, true),
+        std::format("{:.0f}", median(stats.time)));
 }
 
 } // namespace
@@ -403,9 +408,7 @@ auto main(int argc, char* argv[]) -> int {
         *mesh,
         DepthRenderer::Config{.width = kWidth, .height = kHeight, .intrinsics = kIntrinsics});
     auto registration = Registration{};
-    const auto registration_config = Registration::Config{};
-    if (auto initialized = registration.initialize(mesh_path, registration_config);
-        !initialized.has_value()) {
+    if (auto initialized = registration.initialize(mesh_path); !initialized.has_value()) {
         std::println(stderr, "{}", initialized.error());
         return EXIT_FAILURE;
     }
@@ -469,12 +472,7 @@ auto main(int argc, char* argv[]) -> int {
 
         const auto roi = make_roi(exact);
         const auto run = [&](const cv::Mat& depth, const cv::Rect2i& box, const cv::Mat& mask) {
-            const auto begin = Clock::now();
-            const auto cloud = mask.empty()
-                                 ? Registration::depth_to_cloud(depth, kIntrinsics, box)
-                                 : Registration::depth_to_cloud(
-                                       depth, kIntrinsics, box, mask, registration_config);
-            return run_registration(registration, *cloud, scene.target, begin);
+            return run_registration(registration, depth, box, mask, scene.target);
         };
         const auto a = run(frame.depth, roi, {});
         const auto b = run(frame.depth, roi, exact);
@@ -503,14 +501,15 @@ auto main(int argc, char* argv[]) -> int {
         done, skipped, seed, neighbor_counts[1], neighbor_counts[2], occluded,
         visible_fractions.empty() ? 0. : median(visible_fractions));
     std::println(
-        "success: center < {:.0f} mm and axis < {:.0f} deg; error columns in mm / deg over "
-        "trials with a result; time in ms (cloud build + registration)\n",
+        "success: center < {:.0f} mm and axis < {:.0f} deg; rejected = register_depth returned "
+        "nothing; wrong = accepted but not a success; error columns in mm / deg over accepted "
+        "results; time in ms (cloud build + registration + quality check)\n",
         kCenterThresholdMm, kAxisThresholdDeg);
     std::println(
-        "| {:<30} | {:<14} | {:>7} | {:>7} | {:>7} | {:>7} | {:>9} | {:>9} |", "variant", "success",
-        "med ctr", "max ctr", "med ax", "max ax", "no result", "med time");
+        "| {:<30} | {:<14} | {:>8} | {:>7} | {:>7} | {:>7} | {:>7} | {:>9} |", "variant", "success",
+        "rej/wrong", "med ctr", "max ctr", "med ax", "max ax", "med time");
     std::println(
-        "|{:-<32}|{:-<16}|{:-<9}|{:-<9}|{:-<9}|{:-<9}|{:-<11}|{:-<11}|", "", "", "", "", "", "", "",
+        "|{:-<32}|{:-<16}|{:-<10}|{:-<9}|{:-<9}|{:-<9}|{:-<9}|{:-<11}|", "", "", "", "", "", "", "",
         "");
     if (done == 0)
         return EXIT_FAILURE;

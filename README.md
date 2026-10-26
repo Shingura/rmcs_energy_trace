@@ -4,15 +4,11 @@ RMCS 工程机器人的能量单元位姿估计组件。它读取 RGB-D 相机�
 
 整个流程在 CPU 上运行，不依赖 NVIDIA 显卡。
 
-## 当前状态
-
-检测、点云配准和 M3T 跟踪模块已完成，并有离线测试。它们还没有接入组件，`/energy_trace/pose_valid` 始终为 `false`。监督尚未实现。
-
 ## 设计
 
 每帧的处理分为 4 步：
 
-1. **检测**：YOLO 在彩色图中框出能量单元（以后可换成 YOLO-seg，同时输出掩码）。用 OpenVINO 在 CPU 上推理。
+1. **检测**：YOLO 在彩色图中框出能量单元。用 OpenVINO 在 CPU 上推理。
 2. **初始化**：把框内的深度像素转换为点云，用 FPFH 特征粗配准，再用 ICP 精配准，得到初始位姿。
 3. **跟踪**：后续帧用 M3T 从上一帧的位姿开始跟踪，不再每帧做完整配准。
 4. **监督**：根据检测框与投影的重合度、深度一致性和位姿跳变，判断跟踪结果是否可信。不可信时回到第 2 步重新初始化。
@@ -29,29 +25,112 @@ RMCS 工程机器人的能量单元位姿估计组件。它读取 RGB-D 相机�
 位姿的原点在能量单元的几何中心，z 轴沿长轴。注意：`rmcs_core` 中能量单元的参考点在底面以上 72.5 mm 处，本组件的原点在底面以上 75 mm 处，两者相差 2.5 mm。
 
 ## 目录
+```text
+rmcs_energy_trace/
+├── src/
+│   ├── component.cpp              RMCS 组件：声明输入输出接口，调度各模块
+│   │
+│   ├── detection/                 在彩色图中检测能量单元
+│   │   ├── detector.hpp/.cpp      Detector：缩放并填充图像、OpenVINO 推理、解析输出、NMS，返回检测框和得分
+│   │   └── yolo11.hpp             YOLO11 网络的输入输出约定（640 × 640、输出 [1, 5, 8400]）和预处理设置
+│   │
+│   ├── registration/              点云配准，得到初始位姿
+│   │   └── registration.hpp/.cpp  深度图转点云（可用掩码筛选）、去平面、FPFH 粗配准、ICP 精配准、结果检查
+│   │
+│   ├── tracking/                  逐帧跟踪
+│   │   ├── tracker.hpp/.cpp       Tracker：封装 M3T，从初始位姿开始，逐帧输入彩色图和深度图，输出位姿
+│   │   ├── mesh_obj.hpp/.cpp      把 mesh 写成 M3T 读取的 OBJ 文件（单位 m，原点在中心）
+│   │   └── model_files.hpp        M3T 模型文件的文件名和生成参数，生成工具和运行时共用
+│   │
+│   ├── geometry/                  各模块共用的几何类型
+│   │   ├── mesh.hpp/.cpp          读取二进制 STL（mm 转 m，原点移到中心），在表面均匀采样
+│   │   └── camera.hpp             CameraIntrinsics：针孔相机内参
+│   │
+│   ├── synthetic/                 合成数据，只供测试和离线工具使用
+│   │   └── depth_renderer.xpp     按给定位姿渲染深度图、彩色图和实例编号图
+│   │
+│   └── utility/
+│       └── pimpl.hpp              隐藏实现细节的辅助宏
+│
+├── test/                          离线测试，不需要相机和显示器
+│   ├── registration.cpp           配准：在合成深度图上统计中心误差和长轴误差
+│   ├── depth_mask.cpp             深度图转点云时掩码筛选和收缩的单元测试
+│   └── tracking.cpp               跟踪：在合成的连续帧上统计误差和耗时（缺少 M3T 模型时跳过）
+│
+├── tool/                          离线工具
+│   ├── energy_unit_detect.cpp     对图片或目录运行检测，保存画好框的图片
+│   ├── mask_ablation.cpp          对比实验：配准时只用检测框和加掩码的效果
+│   ├── m3t_generate.cpp           生成 M3T 模型文件（需要 OpenGL 和显示，默认不构建）
+│   └── grasp_sim/                 MoveIt 抓取仿真
+│       ├── grasp_sim.cpp          仿真主程序：渲染、配准、生成抓取候选、规划并回放
+│       ├── grasp_candidates.hpp   根据能量单元的中心和长轴生成抓取候选
+│       └── joint_state_player.hpp 发布 /joint_states，按时间插值回放轨迹
+│
+├── third_party/m3t/               随仓库带入的 M3T 源码（MIT），未修改上游文件
+│   ├── README.md                  来源、提交号、删减内容和本地处理方式
+│   ├── include/m3t/               M3T 源码
+│   ├── third_party/               M3T 自带的第三方头文件
+│   └── stubs/                     占位文件：去掉 OpenGL、GLFW、highgui 依赖，以及供 clangd 使用的空 omp.h
+│
+├── scripts/
+│   └── export_yolo.py             把 Ultralytics 的 .pt 权重导出为 OpenVINO 格式
+│
+├── config/
+│   ├── energy_trace.yaml          组件参数示例
+│   └── grasp_sim.yaml             抓取仿真参数
+│
+├── launch/grasp_sim.launch.py     启动抓取仿真（MoveIt、仿真节点、RViz）
+├── rviz/grasp_sim.rviz            抓取仿真的 RViz 配置
+├── meshes/energy_unit.stl         能量单元的 mesh
+├── dataset/                       本地数据，不进入仓库（见下文）
+├── CMakeLists.txt、package.xml、plugins.xml   
+├── .clangd                        
+├── .clang-format、.clang-tidy     
+└── AGENTS.md                      
+```
 
-| 路径 | 内容 |
-|---|---|
-| `src/component.cpp` | 组件，负责接口和调度 |
-| `src/detection/` | YOLO11 检测（OpenVINO，CPU） |
-| `src/registration/` | 点云配准：深度图转点云、FPFH 粗配准、ICP 精配准 |
-| `src/geometry/` | 公共的几何类型：STL 网格读取与表面采样、相机内参 |
-| `src/tracking/` | M3T 跟踪器，以及把 mesh 写成 OBJ 的辅助函数 |
-| `src/synthetic/` | 合成深度图和彩色图渲染，只供测试和离线工具使用 |
-| `src/utility/` | 通用辅助代码 |
-| `test/` | 离线测试，不需要相机 |
-| `third_party/m3t/` | 随仓库带入的 M3T 源码，说明见其中的 `README.md` |
-| `tool/` | 离线工具，例如 `energy_unit_detect`、`m3t_generate`（生成 M3T 模型文件）；`tool/grasp_sim/` 是抓取仿真 |
-| `scripts/` | Python 脚本，例如把 YOLO 权重导出为 OpenVINO 格式 |
-| `config/` | 参数示例 |
-| `launch/`、`rviz/` | 抓取仿真的启动文件和 RViz 配置 |
-| `meshes/energy_unit.stl` | 能量单元 3D 模型，单位 mm，原点在外包长方体的一角 |
+`dataset/` 不进入仓库，需要自己准备：
 
-模型权重和数据集不放进仓库，见 `.gitignore`。
+```text
+dataset/
+├── images/                        测试图片
+├── networks/                      YOLO 权重和导出的 OpenVINO 网络
+└── m3t/                           m3t_generate 生成的 M3T 模型文件（约 150 MB）
+```
+
+## 配准
+
+`registration::Registration` 有两个入口：
+
+- `register_depth(depth, intrinsics, roi, mask)`：推荐使用。它先把框（或掩码）内的深度像素转成点云，配准后再用深度图检查结果。
+- `register_cloud(cloud)`：只接受点云，只能检查场景点能否贴合模型，分不出比能量单元小的物体。
+
+`register_depth` 的检查方法：按估计位姿把能量单元的 mesh 投影到深度图上，逐像素比较，得到 `Result::quality` 中的指标：
+
+| 指标 | 含义 | 接受条件 |
+|---|---|---|
+| `scene_coverage` | 场景点中离模型小于 4 mm 的比例 | ≥ 0.90 |
+| `support_ratio` | 模型投影处，实测深度与模型相差小于 5 mm 的比例 | ≥ 0.88 |
+| `free_space_ratio` | 模型投影处，实测深度比模型远 5 mm 以上的比例，即“本该挡住视线的地方是空的” | ≤ 0.06 |
+| `model_pixels` | 模型投影的像素数 | ≥ 300 |
+
+`support_ratio` 和 `free_space_ratio` 只统计有实测深度的像素。实测深度比模型近的像素算作被遮挡，不算错误。阈值是在合成数据上定的，换成真实相机后需要重新确定。粗配准最多尝试 `Config::coarse_attempts`（默认 24）次，按上面的指标选出最好的一次。
+
+每次粗配准前，程序用 `std::srand(Config::seed + 第几次尝试)` 设置随机种子，因为 PCL 的 RANSAC 使用全局的 `rand()`。所以结果只取决于输入，与调用顺序无关。代价是：配准不能和其他使用 `rand()` 的代码同时运行。
 
 ## 测试与工具
 
-配准测试在合成深度图上各运行 20 次。合格标准是中心误差小于 3 mm，且长轴方向误差小于 2°。
+配准测试在合成深度图上运行 5 组：
+
+| 组 | 场景 | 次数 | 合格条件 |
+|---|---|---|---|
+| A | 任意朝向，无背景 | 50 | 成功率 ≥ 90%，接受但错误的结果不超过 1 次 |
+| B | 竖立在地面上，相机向下倾斜 | 50 | 同上 |
+| 部分视野 | 检测框裁窄到 60% | 50 | 同上 |
+| 错误物体 | 缩小到 0.8 倍的能量单元 | 30 | 全部拒绝 |
+| 错误物体 | 半径 40 mm、高 120 mm 的圆柱 | 30 | 全部拒绝 |
+
+“成功”指中心误差小于 3 mm，且长轴方向误差小于 2°。完整运行约 5.5 分钟。
 
 ```zsh
 /workspaces/RMCS/rmcs_ws/build/rmcs_energy_trace/test_registration
@@ -65,13 +144,13 @@ ros2 run rmcs_energy_trace energy_unit_detect <network.xml> <图片或目录> <�
 
 `network.xml` 由 `scripts/export_yolo.py` 从 Ultralytics 的 `.pt` 权重导出。
 
-掩码消融工具在合成深度图上比较点云配准只用检测框和再加实例掩码的效果。场景与测试 B 相同，并在目标旁放 1 到 2 个相邻的能量单元（间距 5、20 或 50 mm，直立或平躺，部分试验挡在目标前面）。每帧运行 3 种输入：只用框、框加精确掩码、框加模拟 YOLO-seg 的退化掩码，另有一组无相邻单元的对照。默认 40 次试验，每次约 3 s。
+掩码消融工具在合成深度图上比较点云配准只用检测框和再加实例掩码的效果。场景与测试 B 相同，并在目标旁放 1 到 2 个相邻的能量单元（间距 5、20 或 50 mm，直立或平躺，部分试验挡在目标前面）。每帧运行 3 种输入：只用框、框加精确掩码、框加模拟 YOLO-seg 的退化掩码，另有一组无相邻单元的对照。默认 40 次试验。
 
 ```zsh
 ros2 run rmcs_energy_trace mask_ablation [--trials 40] [--seed 2025] [--mesh <energy_unit.stl>]
 ```
 
-输出每次试验的误差和汇总表（成功率、中心和轴向误差的中位数与最大值、无结果次数、耗时）。结果来自合成数据，没有真实传感器的噪声和边缘伪影，只能作为参考。
+输出每次试验的误差和汇总表（成功率、拒绝次数、接受但错误的次数、中心和轴向误差的中位数与最大值、耗时）。`--trials 120` 约需 11 分钟。
 
 `registration::Registration::depth_to_cloud` 有带掩码的重载，掩码先按 `Config::mask_erosion_px`（默认 3 px）向内腐蚀。`test_depth_mask` 是它的单元测试。
 

@@ -1,17 +1,19 @@
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <numbers>
 #include <optional>
 #include <print>
 #include <random>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include <eigen3/Eigen/Geometry>
 #include <gtest/gtest.h>
 #include <opencv2/core.hpp>
-#include <pcl/kdtree/kdtree_flann.h>
 
 #include "geometry/camera.hpp"
 #include "geometry/mesh.hpp"
@@ -25,7 +27,6 @@
 using rmcs_energy_trace::geometry::CameraIntrinsics;
 using rmcs_energy_trace::geometry::load_binary_stl;
 using rmcs_energy_trace::geometry::Mesh;
-using rmcs_energy_trace::geometry::sample_surface;
 using rmcs_energy_trace::registration::Registration;
 using rmcs_energy_trace::synthetic::DepthRenderer;
 
@@ -35,11 +36,20 @@ constexpr int kWidth = 640;
 constexpr int kHeight = 480;
 constexpr CameraIntrinsics kIntrinsics{600., 600., 320., 240.};
 
-constexpr std::size_t kTrials = 20;
-constexpr std::size_t kRequiredPass = 18;
-// 抓取只依赖中心和长轴：ADD-S 对两端认反不敏感（约 2.5 mm），不作为合格标准
+constexpr std::size_t kTrials = 50;
+// 抓取只依赖中心和长轴：绕长轴的滚转对称，两端认反则长轴夹角接近 180°
 constexpr double kCenterThresholdMm = 3.;
 constexpr double kAxisThresholdDeg = 2.;
+
+// 正例：成功率下限，以及被接受的结果里错误结果的数量上限
+constexpr double kMinSuccessRate = 0.9;
+constexpr std::size_t kMaxWrongAccepts = 1;
+// 反例每帧都要跑满全部粗配准尝试，较慢，所以试验数少一些
+constexpr std::size_t kNegativeTrials = 30;
+// 反例（错误物体）被接受的数量上限
+constexpr std::size_t kMaxNegativeAccepts = 0;
+// 部分视野：ROI 只保留物体包围盒宽度的这个比例
+constexpr double kPartialWidthFraction = 0.6;
 
 struct Trial {
     Eigen::Isometry3d pose;
@@ -65,144 +75,60 @@ auto uniform(std::mt19937& engine, double lo, double hi) -> double {
     return std::uniform_real_distribution<double>{lo, hi}(engine);
 }
 
-class Renderer {
-public:
-    explicit Renderer(const Mesh& mesh) {
-        renderer_.initialize(
-            mesh,
-            DepthRenderer::Config{.width = kWidth, .height = kHeight, .intrinsics = kIntrinsics});
+// 沿 z 轴的半长（mesh 已居中），即直立时中心到地面的距离
+auto half_length(const Mesh& mesh) -> double {
+    auto upper = 0.f;
+    for (const auto& triangle : mesh.triangles) {
+        for (const auto& vertex : triangle)
+            upper = std::max(upper, vertex.z());
     }
+    return upper;
+}
 
-    // 渲染物体，ground 非空时同时渲染地面 (法向量 normal、过点 point，相机系)
-    auto render(
-        const Eigen::Isometry3d& pose, std::mt19937& engine,
-        const std::optional<std::pair<Eigen::Vector3d, Eigen::Vector3d>>& ground) const -> Trial {
-        auto plane = std::optional<DepthRenderer::Plane>{};
-        if (ground.has_value())
-            plane = DepthRenderer::Plane{ground->first, ground->second};
-        auto frame = renderer_.render(pose, engine, plane);
-        return Trial{pose, frame.depth, frame.roi};
+auto scaled(const Mesh& mesh, float factor) -> Mesh {
+    auto result = mesh;
+    for (auto& triangle : result.triangles) {
+        for (auto& vertex : triangle)
+            vertex *= factor;
     }
+    return result;
+}
 
-private:
-    DepthRenderer renderer_;
-};
-
-class RegistrationTest : public testing::Test {
-protected:
-    static void SetUpTestSuite() {
-        auto mesh = load_binary_stl(RMCS_ENERGY_UNIT_MESH);
-        ASSERT_TRUE(mesh.has_value()) << mesh.error();
-        mesh_ = std::make_unique<Mesh>(std::move(*mesh));
-        renderer_ = std::make_unique<Renderer>(*mesh_);
-
-        // ADD-S 的查询点稀疏、参考点极密，避免最近邻离散化带来的误差底噪
-        evaluation_xyz_ = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
-        const auto queries = sample_surface(*mesh_, 5000, 123);
-        for (const auto& point : *queries) {
-            evaluation_xyz_->emplace_back(point.x, point.y, point.z);
-        }
-        auto reference = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
-        const auto dense = sample_surface(*mesh_, 1'000'000, 321);
-        for (const auto& point : *dense) {
-            reference->emplace_back(point.x, point.y, point.z);
-        }
-        reference_tree_.setInputCloud(reference);
-
-        registration_ = std::make_unique<Registration>();
-        ASSERT_TRUE(registration_->initialize(RMCS_ENERGY_UNIT_MESH).has_value());
+// 与能量单元不同的实心圆柱，轴沿 z，中心在原点
+auto make_cylinder(float radius, float length) -> Mesh {
+    constexpr std::size_t kSegments = 96;
+    auto mesh = Mesh{};
+    const auto at = [&](std::size_t i, float z) {
+        const auto angle = 2.f * std::numbers::pi_v<float>
+                         * static_cast<float>(i % kSegments) / static_cast<float>(kSegments);
+        return Eigen::Vector3f{radius * std::cos(angle), radius * std::sin(angle), z};
+    };
+    const Eigen::Vector3f bottom{0.f, 0.f, -length / 2}, top{0.f, 0.f, length / 2};
+    for (std::size_t i = 0; i < kSegments; i++) {
+        const auto lo0 = at(i, -length / 2), lo1 = at(i + 1, -length / 2);
+        const auto hi0 = at(i, length / 2), hi1 = at(i + 1, length / 2);
+        mesh.triangles.push_back({lo0, lo1, hi1});
+        mesh.triangles.push_back({lo0, hi1, hi0});
+        mesh.triangles.push_back({top, hi0, hi1});
+        mesh.triangles.push_back({bottom, lo1, lo0});
     }
+    return mesh;
+}
 
-    static auto adds(const Eigen::Isometry3d& truth, const Eigen::Isometry3d& estimate) -> double {
-        // ADD-S：真值下的模型点到估计位姿下模型的最近点距离均值
-        const Eigen::Isometry3d relative = estimate.inverse() * truth;
-        auto sum = 0.;
-        auto indices = std::vector<int>(1);
-        auto dists = std::vector<float>(1);
-        for (const auto& point : *evaluation_xyz_) {
-            const Eigen::Vector3d p = relative * point.getVector3fMap().cast<double>();
-            reference_tree_.nearestKSearch(
-                pcl::PointXYZ{
-                    static_cast<float>(p.x()), static_cast<float>(p.y()),
-                    static_cast<float>(p.z())},
-                1, indices, dists);
-            sum += std::sqrt(dists[0]);
-        }
-        return sum / static_cast<double>(evaluation_xyz_->size());
-    }
+auto make_renderer(const Mesh& mesh) -> std::unique_ptr<DepthRenderer> {
+    auto renderer = std::make_unique<DepthRenderer>();
+    renderer->initialize(
+        mesh, DepthRenderer::Config{.width = kWidth, .height = kHeight, .intrinsics = kIntrinsics});
+    return renderer;
+}
 
-    static void run_case(const char* name, const std::vector<Trial>& trials) {
-        auto passed = std::size_t{};
-        auto adds_all = std::vector<double>{}, trans_all = std::vector<double>{},
-             rot_all = std::vector<double>{}, axis_all = std::vector<double>{},
-             pre = std::vector<double>{}, feat = std::vector<double>{},
-             coarse = std::vector<double>{}, icp = std::vector<double>{},
-             total = std::vector<double>{};
-
-        for (std::size_t i = 0; i < trials.size(); i++) {
-            const auto& trial = trials[i];
-            const auto cloud = Registration::depth_to_cloud(trial.depth, kIntrinsics, trial.roi);
-            const auto result = registration_->register_cloud(*cloud);
-            if (!result.has_value()) {
-                std::println("[{}] #{:02} no result (cloud {} points)", name, i, cloud->size());
-                adds_all.push_back(1.);
-                continue;
-            }
-            const auto error = adds(trial.pose, result->pose);
-            const Eigen::Isometry3d delta = trial.pose.inverse() * result->pose;
-            const auto trans = (trial.pose.translation() - result->pose.translation()).norm() * 1e3;
-            const auto rot = Eigen::AngleAxisd{delta.rotation()}.angle() * 180. / std::numbers::pi;
-            // 长轴（模型 z 轴）方向误差，接近 180° 表示两端认反
-            const auto axis_cos =
-                std::clamp(trial.pose.linear().col(2).dot(result->pose.linear().col(2)), -1., 1.);
-            const auto axis = std::acos(axis_cos) * 180. / std::numbers::pi;
-            std::println(
-                "[{}] #{:02} adds={:.2f}mm trans={:.2f}mm rot={:.1f}deg axis={:.1f}deg "
-                "inlier={:.2f} fit={:.1e} "
-                "t(pre/feat/coarse/icp)={:.0f}/{:.0f}/{:.0f}/{:.0f}ms",
-                name, i, error * 1e3, trans, rot, axis, result->inlier_ratio, result->fitness,
-                result->timing.preprocess_ms, result->timing.feature_ms, result->timing.coarse_ms,
-                result->timing.icp_ms);
-            if (trans < kCenterThresholdMm && axis < kAxisThresholdDeg)
-                passed++;
-            adds_all.push_back(error * 1e3);
-            trans_all.push_back(trans);
-            rot_all.push_back(rot);
-            axis_all.push_back(axis);
-            pre.push_back(result->timing.preprocess_ms);
-            feat.push_back(result->timing.feature_ms);
-            coarse.push_back(result->timing.coarse_ms);
-            icp.push_back(result->timing.icp_ms);
-            total.push_back(result->timing.total_ms);
-        }
-
-        std::println(
-            "[{}] passed {}/{} (center < {:.0f}mm, axis < {:.0f}deg) | median/max trans "
-            "{:.2f}/{:.2f}mm axis {:.1f}/{:.1f}deg | median/max adds {:.2f}/{:.2f}mm | "
-            "median rot {:.1f}deg | median ms pre {:.0f} feat {:.0f} coarse {:.0f} icp "
-            "{:.0f} total {:.0f}",
-            name, passed, trials.size(), kCenterThresholdMm, kAxisThresholdDeg, median(trans_all),
-            *std::ranges::max_element(trans_all), median(axis_all),
-            *std::ranges::max_element(axis_all), median(adds_all),
-            *std::ranges::max_element(adds_all), median(rot_all), median(pre), median(feat),
-            median(coarse), median(icp), median(total));
-        EXPECT_GE(passed, kRequiredPass);
-    }
-
-    static inline std::unique_ptr<Mesh> mesh_;
-    static inline std::unique_ptr<Renderer> renderer_;
-    static inline pcl::KdTreeFLANN<pcl::PointXYZ> reference_tree_;
-    static inline pcl::PointCloud<pcl::PointXYZ>::Ptr evaluation_xyz_;
-    static inline std::unique_ptr<Registration> registration_;
-};
-
-} // namespace
-
-TEST_F(RegistrationTest, RandomOrientationNoBackground) {
+// 场景 A：随机朝向，无背景
+auto make_trials_a(const DepthRenderer& renderer, std::uint32_t seed, std::size_t count)
+    -> std::vector<Trial> {
     // NOLINTNEXTLINE(cert-msc51-cpp): 固定种子保证测试可复现
-    auto engine = std::mt19937{2024};
+    auto engine = std::mt19937{seed};
     auto trials = std::vector<Trial>{};
-    for (std::size_t i = 0; i < kTrials; i++) {
+    for (std::size_t i = 0; i < count; i++) {
         const auto distance = uniform(engine, 0.4, 0.8);
         // 物体中心在光轴附近，保证完整位于视野内
         const Eigen::Vector3d center{
@@ -213,16 +139,20 @@ TEST_F(RegistrationTest, RandomOrientationNoBackground) {
         auto pose = Eigen::Isometry3d::Identity();
         pose.linear() = random_rotation(engine);
         pose.translation() = center;
-        trials.push_back(renderer_->render(pose, engine, std::nullopt));
+        const auto frame = renderer.render(pose, engine, std::nullopt);
+        trials.push_back({pose, frame.depth, frame.roi});
     }
-    run_case("A", trials);
+    return trials;
 }
 
-TEST_F(RegistrationTest, UprightOnGroundPlane) {
+// 场景 B：直立在地面上，相机俯视 30~60 度。ground_offset 为中心到地面的距离
+auto make_trials_b(
+    const DepthRenderer& renderer, std::uint32_t seed, std::size_t count, double ground_offset)
+    -> std::vector<Trial> {
     // NOLINTNEXTLINE(cert-msc51-cpp): 固定种子保证测试可复现
-    auto engine = std::mt19937{4048};
+    auto engine = std::mt19937{seed};
     auto trials = std::vector<Trial>{};
-    for (std::size_t i = 0; i < kTrials; i++) {
+    for (std::size_t i = 0; i < count; i++) {
         const auto distance = uniform(engine, 0.4, 0.8);
         const auto tilt = uniform(engine, 30., 60.) * std::numbers::pi / 180.;
         const auto yaw = uniform(engine, 0., 2. * std::numbers::pi);
@@ -246,10 +176,172 @@ TEST_F(RegistrationTest, UprightOnGroundPlane) {
             world_to_camera * Eigen::AngleAxisd{yaw, Eigen::Vector3d::UnitZ()}.toRotationMatrix();
         pose.translation() = center;
 
-        // 物体中心位于地面之上 0.0725 m（模型 z 轴为竖直方向）
+        // 模型 z 轴为竖直方向
         const Eigen::Vector3d up = world_to_camera * Eigen::Vector3d::UnitZ();
-        const Eigen::Vector3d ground_point = center - 0.0725 * up;
-        trials.push_back(renderer_->render(pose, engine, std::pair{up, ground_point}));
+        const auto frame =
+            renderer.render(pose, engine, DepthRenderer::Plane{up, center - ground_offset * up});
+        trials.push_back({pose, frame.depth, frame.roi});
     }
-    run_case("B", trials);
+    return trials;
+}
+
+// 只保留 ROI 宽度的一部分（左或右），模拟检测框只框住物体的一部分
+auto cut_roi(std::vector<Trial> trials, std::uint32_t seed) -> std::vector<Trial> {
+    // NOLINTNEXTLINE(cert-msc51-cpp): 固定种子保证测试可复现
+    auto engine = std::mt19937{seed};
+    for (auto& trial : trials) {
+        const auto width = static_cast<int>(trial.roi.width * kPartialWidthFraction);
+        const auto left = std::bernoulli_distribution{0.5}(engine);
+        if (!left)
+            trial.roi.x += trial.roi.width - width;
+        trial.roi.width = width;
+    }
+    return trials;
+}
+
+struct Counts {
+    std::size_t trials = 0;
+    std::size_t success = 0;        // 被接受且中心、长轴都达标
+    std::size_t rejected = 0;       // 返回空
+    std::size_t accepted_wrong = 0; // 被接受但中心或长轴不达标
+};
+
+// 逐个配准并打印。每行只含由输入决定的内容，耗时单独成行，便于比较不同运行顺序的输出
+auto run_trials(
+    const Registration& registration, const char* name, const std::vector<Trial>& trials)
+    -> Counts {
+    auto counts = Counts{};
+    auto total_ms = std::vector<double>{}, quality_ms = std::vector<double>{};
+    auto timing_lines = std::string{};
+
+    for (std::size_t i = 0; i < trials.size(); i++) {
+        const auto& trial = trials[i];
+        counts.trials++;
+        const auto result = registration.register_depth(trial.depth, kIntrinsics, trial.roi);
+        if (!result.has_value()) {
+            counts.rejected++;
+            std::println("[{}] #{:02} rejected", name, i);
+            continue;
+        }
+        const auto trans = (trial.pose.translation() - result->pose.translation()).norm() * 1e3;
+        // 长轴（模型 z 轴）方向误差，接近 180° 表示两端认反
+        const auto axis_cos =
+            std::clamp(trial.pose.linear().col(2).dot(result->pose.linear().col(2)), -1., 1.);
+        const auto axis = std::acos(axis_cos) * 180. / std::numbers::pi;
+        const auto correct = trans < kCenterThresholdMm && axis < kAxisThresholdDeg;
+        correct ? counts.success++ : counts.accepted_wrong++;
+        const auto& quality = result->quality;
+        std::println(
+            "[{}] #{:02} accepted {} trans={:.2f}mm axis={:.1f}deg inlier={:.3f} support={:.3f} "
+            "free={:.3f} occluded={:.3f} missing={:.3f} pixels={}",
+            name, i, correct ? "ok   " : "WRONG", trans, axis, result->inlier_ratio,
+            quality.support_ratio, quality.free_space_ratio, quality.occluded_ratio,
+            quality.missing_ratio, quality.model_pixels);
+        total_ms.push_back(result->timing.total_ms);
+        quality_ms.push_back(result->timing.quality_ms);
+    }
+    std::println(
+        "[{}] summary: {} trials, success {}, rejected {}, accepted-wrong {} (success: center < "
+        "{:.0f}mm and axis < {:.0f}deg)",
+        name, counts.trials, counts.success, counts.rejected, counts.accepted_wrong,
+        kCenterThresholdMm, kAxisThresholdDeg);
+    std::println(
+        "[{}] timing (not part of the deterministic output): median total {:.0f}ms, median "
+        "quality check {:.1f}ms",
+        name, median(total_ms), median(quality_ms));
+    return counts;
+}
+
+auto run_negative_trials(
+    const Registration& registration, const char* name, const std::vector<Trial>& trials)
+    -> std::size_t {
+    auto accepted = std::size_t{};
+    auto total_ms = std::vector<double>{};
+    for (std::size_t i = 0; i < trials.size(); i++) {
+        const auto result =
+            registration.register_depth(trials[i].depth, kIntrinsics, trials[i].roi);
+        if (!result.has_value()) {
+            std::println("[{}] #{:02} rejected", name, i);
+            continue;
+        }
+        accepted++;
+        const auto trans = (trials[i].pose.translation() - result->pose.translation()).norm() * 1e3;
+        const auto& quality = result->quality;
+        std::println(
+            "[{}] #{:02} ACCEPTED trans={:.2f}mm inlier={:.3f} support={:.3f} free={:.3f} "
+            "occluded={:.3f} missing={:.3f} pixels={}",
+            name, i, trans, result->inlier_ratio, quality.support_ratio, quality.free_space_ratio,
+            quality.occluded_ratio, quality.missing_ratio, quality.model_pixels);
+        total_ms.push_back(result->timing.total_ms);
+    }
+    std::println(
+        "[{}] summary: {} trials, rejected {}, wrongly accepted {}", name, trials.size(),
+        trials.size() - accepted, accepted);
+    return accepted;
+}
+
+class RegistrationTest : public testing::Test {
+protected:
+    static void SetUpTestSuite() {
+        auto mesh = load_binary_stl(RMCS_ENERGY_UNIT_MESH);
+        ASSERT_TRUE(mesh.has_value()) << mesh.error();
+        mesh_ = std::make_unique<Mesh>(std::move(*mesh));
+        renderer_ = make_renderer(*mesh_);
+
+        registration_ = std::make_unique<Registration>();
+        ASSERT_TRUE(registration_->initialize(RMCS_ENERGY_UNIT_MESH).has_value());
+    }
+
+    static void expect_positive(const char* name, const Counts& counts) {
+        EXPECT_GE(
+            static_cast<double>(counts.success),
+            kMinSuccessRate * static_cast<double>(counts.trials))
+            << name;
+        EXPECT_LE(counts.accepted_wrong, kMaxWrongAccepts) << name;
+    }
+
+    static inline std::unique_ptr<Mesh> mesh_;
+    static inline std::unique_ptr<DepthRenderer> renderer_;
+    static inline std::unique_ptr<Registration> registration_;
+};
+
+} // namespace
+
+TEST_F(RegistrationTest, RandomOrientationNoBackground) {
+    const auto trials = make_trials_a(*renderer_, 2024, kTrials);
+    expect_positive("A", run_trials(*registration_, "A", trials));
+}
+
+TEST_F(RegistrationTest, UprightOnGroundPlane) {
+    const auto trials = make_trials_b(*renderer_, 4048, kTrials, half_length(*mesh_));
+    expect_positive("B", run_trials(*registration_, "B", trials));
+}
+
+// 反例：场景里是另一个更小的物体，注册的仍是真实能量单元，必须被拒绝
+TEST_F(RegistrationTest, RejectsScaledMesh) {
+    const auto small = scaled(*mesh_, 0.8f);
+    const auto renderer = make_renderer(small);
+    auto trials = make_trials_a(*renderer, 6001, kNegativeTrials / 2);
+    const auto upright = make_trials_b(*renderer, 6002, kNegativeTrials / 2, half_length(small));
+    trials.insert(trials.end(), upright.begin(), upright.end());
+    EXPECT_LE(run_negative_trials(*registration_, "scaled0.8", trials), kMaxNegativeAccepts);
+}
+
+TEST_F(RegistrationTest, RejectsCylinder) {
+    const auto cylinder = make_cylinder(0.04f, 0.12f);
+    const auto renderer = make_renderer(cylinder);
+    auto trials = make_trials_a(*renderer, 7001, kNegativeTrials / 2);
+    const auto upright = make_trials_b(*renderer, 7002, kNegativeTrials / 2, half_length(cylinder));
+    trials.insert(trials.end(), upright.begin(), upright.end());
+    EXPECT_LE(run_negative_trials(*registration_, "cylinder", trials), kMaxNegativeAccepts);
+}
+
+// 部分视野：ROI 只框住物体宽度的 60%。结果要么正确，要么被拒绝，不能被接受而错误
+TEST_F(RegistrationTest, PartialViewIsCorrectOrRejected) {
+    auto trials = cut_roi(make_trials_a(*renderer_, 8001, kTrials / 2), 8101);
+    const auto upright =
+        cut_roi(make_trials_b(*renderer_, 8002, kTrials / 2, half_length(*mesh_)), 8102);
+    trials.insert(trials.end(), upright.begin(), upright.end());
+    const auto counts = run_trials(*registration_, "partial", trials);
+    EXPECT_LE(counts.accepted_wrong, kMaxWrongAccepts);
 }
