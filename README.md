@@ -35,7 +35,8 @@ rmcs_energy_trace/
 │   │   └── yolo11.hpp             YOLO11 网络的输入输出约定（640 × 640、输出 [1, 5, 8400]）和预处理设置
 │   │
 │   ├── registration/              点云配准，得到初始位姿
-│   │   └── registration.hpp/.cpp  深度图转点云（可用掩码筛选）、去平面、FPFH 粗配准、ICP 精配准、结果检查
+│   │   ├── registration.hpp/.cpp  深度图转点云（可用掩码筛选）、去平面、FPFH 粗配准、ICP 精配准、结果检查
+│   │   └── point_to_plane.hpp/.cpp ICP 每次迭代的求解：约束不足的方向不移动，不会得到 NaN
 │   │
 │   ├── tracking/                  逐帧跟踪
 │   │   ├── tracker.hpp/.cpp       Tracker：封装 M3T，从初始位姿开始，逐帧输入彩色图和深度图，输出位姿
@@ -55,6 +56,7 @@ rmcs_energy_trace/
 ├── test/                          离线测试，不需要相机和显示器
 │   ├── registration.cpp           配准：在合成深度图上统计中心误差和长轴误差
 │   ├── depth_mask.cpp             深度图转点云时掩码筛选和收缩的单元测试
+│   ├── point_to_plane.cpp         ICP 求解的单元测试，包括约束不足的输入
 │   └── tracking.cpp               跟踪：在合成的连续帧上统计误差和耗时（缺少 M3T 模型时跳过）
 │
 ├── tool/                          离线工具

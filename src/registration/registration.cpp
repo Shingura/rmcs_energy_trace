@@ -12,6 +12,7 @@
 #include <opencv2/imgproc.hpp>
 
 #include "geometry/mesh.hpp"
+#include "registration/point_to_plane.hpp"
 
 #include <pcl/ModelCoefficients.h>
 #include <pcl/features/fpfh_omp.h>
@@ -22,7 +23,6 @@
 #include <pcl/kdtree/kdtree_flann.h>
 #include <pcl/registration/icp.h>
 #include <pcl/registration/sample_consensus_prerejective.h>
-#include <pcl/registration/transformation_estimation_point_to_plane_lls.h>
 #include <pcl/segmentation/sac_segmentation.h>
 
 namespace rmcs_energy_trace::registration {
@@ -290,9 +290,7 @@ struct Registration::Impl {
         Eigen::Matrix4f scene_to_model = initial;
         for (const auto distance : config.icp_max_correspondences) {
             auto icp = pcl::IterativeClosestPoint<pcl::PointNormal, pcl::PointNormal>{};
-            icp.setTransformationEstimation(
-                std::make_shared<pcl::registration::TransformationEstimationPointToPlaneLLS<
-                    pcl::PointNormal, pcl::PointNormal>>());
+            icp.setTransformationEstimation(std::make_shared<PointToPlaneEstimation>());
             icp.setInputSource(source);
             icp.setInputTarget(refine_model);
             icp.setMaximumIterations(config.icp_max_iterations);
