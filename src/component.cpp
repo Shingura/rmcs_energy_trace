@@ -21,7 +21,7 @@ public:
         : Node(
               get_component_name(),
               rclcpp::NodeOptions{}.automatically_declare_parameters_from_overrides(true)) {
-        register_output("/energy_trace/pose_valid", pose_valid_, false);
+        register_output("/energy_trace/is_pose_valid", is_pose_valid_, false);
         register_output("/energy_trace/pose", pose_, Eigen::Isometry3d::Identity());
 
         mesh_path_ = get_parameter_or<std::string>("mesh_path", "");
@@ -41,11 +41,11 @@ public:
 
     void update() override {
         // 检测、配准和跟踪尚未接入，暂时始终输出无效
-        *pose_valid_ = false;
+        *is_pose_valid_ = false;
     }
 
 private:
-    OutputInterface<bool> pose_valid_;
+    OutputInterface<bool> is_pose_valid_;
     OutputInterface<Eigen::Isometry3d> pose_;
 
     std::string mesh_path_;

@@ -19,7 +19,7 @@ RMCS 工程机器人的能量单元位姿估计组件。它读取 RGB-D 相机�
 
 | 名称 | 类型 | 说明 |
 |---|---|---|
-| `/energy_trace/pose_valid` | `bool` | 位姿是否可信 |
+| `/energy_trace/is_pose_valid` | `bool` | 位姿是否可信 |
 | `/energy_trace/pose` | `Eigen::Isometry3d` | 相机坐标系下能量单元的位姿，单位 m |
 
 位姿的原点在能量单元的几何中心，z 轴沿长轴指向 Ø95 封闭头。能量单元绕长轴近似 3 重对称，绕 z 轴的转角无法可靠观测，x、y 轴的方向没有意义，使用方只能用原点和 z 轴。
