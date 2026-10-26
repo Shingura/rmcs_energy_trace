@@ -68,12 +68,14 @@ std::expected<Mesh, std::string> load_binary_stl(const std::string& path) noexce
     return mesh;
 }
 
+/// @brief: 将 mesh 转换成点云
 pcl::PointCloud<pcl::PointNormal>::Ptr
     sample_surface(const Mesh& mesh, std::size_t count, std::uint32_t seed) noexcept {
     auto cloud = std::make_shared<pcl::PointCloud<pcl::PointNormal>>();
     if (mesh.triangles.empty() || count == 0)
         return cloud;
 
+    // 按三角形面积分配采样点数量
     auto cumulative = std::vector<float>{};
     cumulative.reserve(mesh.triangles.size());
     std::ranges::transform(
@@ -82,6 +84,7 @@ pcl::PointCloud<pcl::PointNormal>::Ptr
             return total += Mesh::area(triangle);
         });
 
+    // 随机选取三角形，并在其中均匀取点
     auto engine = std::mt19937{seed};
     auto area_dist = std::uniform_real_distribution<float>{0.f, cumulative.back()};
     auto unit_dist = std::uniform_real_distribution<float>{0.f, 1.f};
