@@ -4,6 +4,7 @@
 #include "joint_state_player.hpp"
 
 #include "geometry/camera.hpp"
+#include "geometry/depth_cloud.hpp"
 #include "geometry/mesh.hpp"
 #include "registration/registration.hpp"
 #include "synthetic/depth_renderer.hpp"
@@ -339,8 +340,7 @@ private:
     // 整幅深度图反投影，裁到桌面范围以便在 RViz 中观察
     void build_cloud_message(const cv::Mat& depth) {
         const auto full = cv::Rect2i{0, 0, depth.cols, depth.rows};
-        const auto cloud =
-            registration::Registration::depth_to_cloud(depth, render_config_.camera, full);
+        const auto cloud = geometry::depth_to_cloud(depth, render_config_.camera, full);
         auto cropped = pcl::PointCloud<pcl::PointXYZ>{};
         for (const auto& point : *cloud) {
             const Eigen::Vector3d p = camera_pose_ * point.getVector3fMap().cast<double>();
@@ -717,9 +717,11 @@ private:
             logger_, "registration: centre error %.2f mm, axis error %.2f deg, inlier %.2f",
             s.center_error_mm, s.axis_error_deg, s.inlier_ratio);
         RCLCPP_INFO(
-            logger_, "registration timing (ms): pre %.0f feat %.0f coarse %.0f icp %.0f total %.0f",
-            s.timing.preprocess_ms, s.timing.feature_ms, s.timing.coarse_ms, s.timing.icp_ms,
-            s.timing.total_ms);
+            logger_,
+            "registration timing (ms): pre %.0f normal %.0f coarse %.0f icp %.0f quality %.0f "
+            "total %.0f",
+            s.timing.preprocess_ms, s.timing.normal_ms, s.timing.coarse_ms, s.timing.icp_ms,
+            s.timing.quality_ms, s.timing.total_ms);
         RCLCPP_INFO(logger_, "candidates tried %zu (IK rejected %zu)", s.tried, s.ik_rejected);
         if (success) {
             RCLCPP_INFO(

@@ -44,12 +44,14 @@ constexpr double kAxisThresholdDeg = 2.;
 // 正例：成功率下限，以及被接受的结果里错误结果的数量上限
 constexpr double kMinSuccessRate = 0.9;
 constexpr std::size_t kMaxWrongAccepts = 1;
-// 反例每帧都要跑满全部粗配准尝试，较慢，所以试验数少一些
+// 反例的试验数少一些，以控制测试时间
 constexpr std::size_t kNegativeTrials = 30;
 // 反例（错误物体）被接受的数量上限
 constexpr std::size_t kMaxNegativeAccepts = 0;
 // 带掩码的两组测试的试验数
 constexpr std::size_t kMaskTrials = 20;
+// 模型 z 轴指向封闭端。z 轴与“相机指向物体”方向夹角的余弦大于该值时，开口端正对相机 60° 以内
+constexpr double kMaxOpenEndFacing = 0.5;
 // 部分视野：ROI 只保留物体包围盒宽度的这个比例
 constexpr double kPartialWidthFraction = 0.6;
 
@@ -124,7 +126,8 @@ auto make_renderer(const Mesh& mesh) -> std::unique_ptr<DepthRenderer> {
     return renderer;
 }
 
-// 场景 A：随机朝向，无背景
+// 场景 A：随机朝向，无背景。排除开口端正对相机 60° 以内的朝向：取矿时开口端套在柱子上，
+// 相机看不到它，模型里也没有孔壁
 auto make_trials_a(const DepthRenderer& renderer, std::uint32_t seed, std::size_t count)
     -> std::vector<Trial> {
     // NOLINTNEXTLINE(cert-msc51-cpp): 固定种子保证测试可复现
@@ -139,7 +142,9 @@ auto make_trials_a(const DepthRenderer& renderer, std::uint32_t seed, std::size_
             distance,
         };
         auto pose = Eigen::Isometry3d::Identity();
-        pose.linear() = random_rotation(engine);
+        do {
+            pose.linear() = random_rotation(engine);
+        } while (pose.linear().col(2).dot(center.normalized()) > kMaxOpenEndFacing);
         pose.translation() = center;
         const auto frame = renderer.render(pose, engine, std::nullopt);
         trials.push_back({pose, frame.depth, frame.roi, frame.mask});

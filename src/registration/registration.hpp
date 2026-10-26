@@ -4,7 +4,6 @@
 #include "utility/pimpl.hpp"
 
 #include <cstddef>
-#include <cstdint>
 #include <expected>
 #include <optional>
 #include <string>
@@ -13,56 +12,54 @@
 #include <eigen3/Eigen/Geometry>
 #include <opencv2/core/mat.hpp>
 #include <opencv2/core/types.hpp>
-#include <pcl/point_cloud.h>
-#include <pcl/point_types.h>
 
 namespace rmcs_energy_trace::registration {
 
+// 由深度图求能量单元的位姿：PPF 粗配准给出若干候选，每个候选做 ICP 精配准和绕长轴的扫描，
+// 再把 mesh 按候选位姿渲染成深度图与实测比较，选出通过验收且最好的一个。
+// 同一个实例不能在多个线程中同时调用 register_depth（OpenCV 的 PPF 匹配会修改内部状态）
 class Registration {
     RMCS_PIMPL_DEFINITION(Registration)
 
 public:
-    using Cloud = pcl::PointCloud<pcl::PointXYZ>;
-
     struct Config {
         // 掩码内缩像素数：使用掩码反投影前先向内腐蚀，去掉边界上的混合深度
         int mask_erosion_px = 3;
 
-        // 模型
-        std::size_t model_sample_count = 200000;
-        float model_voxel_size = 0.004f;
+        // 模型：在 mesh 表面采样，按两种间距下采样，只保留外表面的点（沿法线向外看不到 mesh）。
+        // 开口端的孔壁不在模型里：取矿时开口端套在柱子上，看不到
+        std::size_t model_sample_count = 400000;
+        float model_voxel_size = 0.004f;  // PPF 训练用
+        float refine_voxel_size = 0.002f; // ICP 和内点率用
 
         // 场景预处理
-        float scene_voxel_size = 0.004f;
+        float scene_voxel_size = 0.003f;
         float plane_distance_threshold = 0.004f;
         float plane_min_inlier_ratio = 0.3f;
         int plane_max_iterations = 200;
         int outlier_mean_k = 20;
         float outlier_stddev_multiplier = 2.0f;
         std::size_t min_scene_points = 200;
-
-        // 粗配准 (FPFH + SampleConsensusPrerejective)
+        // 场景法线的估计半径，法线朝向相机
         float normal_radius = 0.012f;
-        float feature_radius = 0.030f;
-        // 近对称物体的单次 RANSAC 常落入错误盆地，少于 8 次时随机朝向场景约四分之一找不到正确解，
-        // 24 次降到约 6%（正确候选会提前结束，所以典型耗时几乎不变，只有拒绝时才跑满）
-        int coarse_attempts = 24;
-        // 粗配准累计失败（找不到满足内点比例的假设）达到该次数则放弃当前场景候选
-        int coarse_max_failures = 2;
-        // PCL 的 SampleConsensusPrerejective 用全局 rand() 取样。每次 RANSAC 前调用
-        // std::srand(seed + 第几次尝试)，使结果只取决于输入，与调用顺序无关。
-        // 代价：配准会改写全局 rand() 状态，且不能与其他使用 rand() 的线程并发运行
-        std::uint32_t seed = 42;
-        int ransac_iterations = 20000;
-        int ransac_correspondence_k = 5;
-        float ransac_similarity_threshold = 0.9f;
-        float ransac_inlier_threshold = 0.008f;
-        float ransac_inlier_fraction = 0.7f;
 
-        // 精配准 (point-to-plane ICP)
-        int icp_max_iterations = 30;
-        std::vector<float> icp_max_correspondences = {0.010f, 0.005f, 0.003f};
-        float refine_voxel_size = 0.002f;
+        // 粗配准（OpenCV PPF）。下面的距离都是相对模型直径（包围盒对角线，约 0.2 m）的比例
+        double ppf_sampling_step = 0.08;
+        double ppf_distance_step = 0.03;
+        double ppf_angle_count = 30.;
+        double ppf_scene_sample_step = 0.2; // 场景点每 5 个取 1 个作为参考点
+        double ppf_scene_distance = 0.05;
+        // 按票数取前几个位姿继续精配准
+        std::size_t ppf_candidates = 5;
+
+        // 精配准（point-to-plane ICP），对应距离逐级收紧
+        int icp_max_iterations = 60;
+        std::vector<float> icp_max_correspondences = {0.010f, 0.006f, 0.004f, 0.003f, 0.002f};
+        // 绕长轴扫描时，在一个周期（3 重对称为 120°）内取的角度数。转角不影响中心和长轴，
+        // 但筋的位置对不上时支持率偏低，而 ICP 很难把转角转回来
+        int roll_samples = 12;
+        // 扫描后的 ICP 起点已经很近，只用较紧的几级
+        std::vector<float> roll_icp_max_correspondences = {0.004f, 0.003f, 0.002f};
 
         // 候选评价与验收。内点率只衡量“场景是否落在 mesh 上”，任何比 mesh 小的
         // 表面都能得高分，所以还要用深度图检查“mesh 是否被场景支持”
@@ -78,19 +75,13 @@ public:
         // 0.8 倍缩小的 mesh 最好的候选支持率约 0.83、违例 >= 0.07
         float min_support_ratio = 0.88f;
         float max_free_space_ratio = 0.06f;
-        // 提前结束粗配准的条件：候选已通过验收，且内点率不低于该值；
-        // 有深度图时还要求支持率不低于 early_stop_support_ratio、空闲空间违例不高于
-        // early_stop_free_space_ratio。仅凭内点率会把错误盆地（0.97~0.98）当作最优
-        float early_stop_inlier_ratio = 0.99f;
-        float early_stop_support_ratio = 0.97f;
-        float early_stop_free_space_ratio = 0.01f;
     };
 
     struct Timing {
         double preprocess_ms = 0.;
-        double feature_ms = 0.;
-        double coarse_ms = 0.;
-        double icp_ms = 0.;
+        double normal_ms = 0.; // 场景法线
+        double coarse_ms = 0.; // PPF 匹配
+        double icp_ms = 0.;    // ICP 和绕长轴扫描
         double quality_ms = 0.;
         double total_ms = 0.;
     };
@@ -104,49 +95,26 @@ public:
     // 那里深度相同或更近可能是相邻物体，说明不了位姿对错。
     // 遮挡计入 valid、会降低支持率，这是有意的：否则一个整体落在真实表面后面的错误位姿，
     // 只剩少数像素参与统计，也能得到很高的支持率。所以没有掩码时，目标被挡住较多会被拒绝。
-    // register_cloud 没有深度图，只有 scene_coverage 有意义，depth_checked 为 false
     struct Quality {
-        bool depth_checked = false;
         std::size_t model_pixels = 0; // 渲染 mesh 在掩码内的像素数（没有掩码时为 ROI 内）
         double support_ratio = 0.;    // 支持 / valid
         double free_space_ratio = 0.; // 空闲空间违例 / valid
         double occluded_ratio = 0.;   // 遮挡 / valid
         double missing_ratio = 0.;    // 掩码内无实测深度的像素 / model_pixels
-        double scene_coverage = 0.; // 场景点中距 mesh 小于 inlier_distance 的比例，即 inlier_ratio
     };
 
     struct Result {
-        Eigen::Isometry3d pose;     // mesh -> camera
-        double inlier_ratio;        // 场景点中距 mesh 小于 inlier_distance 的比例
+        Eigen::Isometry3d pose;       // mesh -> camera
+        double inlier_ratio;          // 场景点中距 mesh 小于 inlier_distance 的比例
         Quality quality;
         Timing timing;
     };
-
-    // 深度图 (CV_16UC1，单位见 camera.depth_scale，0 为无效) 在 roi 内反投影为相机系点云 (m)
-    static Cloud::Ptr depth_to_cloud(
-        const cv::Mat& depth, const geometry::Camera& camera, const cv::Rect2i& roi) noexcept;
-
-    // 同上，并只保留掩码 (CV_8UC1，与深度图同尺寸，非 0 保留) 内的像素，
-    // 掩码先按 config.mask_erosion_px 内缩。掩码为空时与不带掩码的版本一致，
-    // 类型或尺寸不符时返回空点云
-    static Cloud::Ptr depth_to_cloud(
-        const cv::Mat& depth, const geometry::Camera& camera, const cv::Rect2i& roi,
-        const cv::Mat& mask, const Config& config) noexcept;
-    // 注意：这个重载固定使用 Config{} 的默认值（含 mask_erosion_px = 3），不读取任何实例的配置；
-    // 需要实例配置时用 register_depth，或显式传入 Config
-    static Cloud::Ptr depth_to_cloud(
-        const cv::Mat& depth, const geometry::Camera& camera, const cv::Rect2i& roi,
-        const cv::Mat& mask) noexcept;
 
     std::expected<void, std::string>
         initialize(const std::string& stl_path, const Config& config) noexcept;
     std::expected<void, std::string> initialize(const std::string& stl_path) noexcept;
 
-    // 只有点云：只能用内点率验收（不检查 mesh 是否被场景支持），因此挡不住
-    // “比真实物体小的表面”，quality 里只有 scene_coverage。需要可靠验收时用 register_depth
-    std::optional<Result> register_cloud(const Cloud& scene) const noexcept;
-
-    // 深度图 -> 点云（按本实例的 mask_erosion_px 处理掩码）-> 配准 -> 深度一致性检查。
+    // 深度图 -> 点云（按 mask_erosion_px 处理掩码）-> 配准 -> 深度一致性检查。
     // mask 为空表示只用 roi。未通过验收（内点率、支持率、空闲空间违例）时返回空
     std::optional<Result> register_depth(
         const cv::Mat& depth, const geometry::Camera& camera, const cv::Rect2i& roi,
