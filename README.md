@@ -81,6 +81,8 @@ rmcs_energy_trace/
 │   ├── mask_ablation.cpp          对比实验：配准时只用检测框和加掩码的效果
 │   ├── sequence_replay.cpp        在渲染的连续 RGB-D 序列上运行 Pipeline，输出叠加画面的视频和相对真值的误差
 │   ├── m3t_generate.cpp           生成 M3T 模型文件（需要 OpenGL 和显示，默认不构建）
+│   ├── pickup_plan/
+│   │   └── pickup_plan.cpp        用 MoveIt 规划中心块取矿的全过程，导出规划文件供 render_sequence.py 渲染
 │   └── grasp_sim/                 MoveIt 抓取仿真
 │       ├── grasp_sim.cpp          仿真主程序：渲染、配准、生成抓取候选、规划并回放
 │       ├── grasp_candidates.hpp   根据能量单元的中心和长轴生成抓取候选
@@ -99,15 +101,19 @@ rmcs_energy_trace/
 │   ├── export_sam.py              把 SAM 的官方权重导出为编码器和解码器两个 ONNX 网络
 │   └── synth/                     检测网络的合成训练数据
 │       ├── render_dataset.py      在 Blender 中随机搭建取矿场景，渲染彩色图和编号图
-│       ├── render_sequence.py     渲染一段连续的 RGB-D 序列，供 sequence_replay 回放
+│       ├── render_sequence.py     渲染一段连续的 RGB-D 序列，供 sequence_replay 回放；可按取矿规划驱动机械臂和相机
+│       ├── arm.py                 Blender 中的机械臂：读 URDF、正运动学、导入各连杆的 STL、相机支架
 │       ├── make_yolo_dataset.py   把渲染结果转换成 Ultralytics 的分割数据集
 │       └── download_hdri.sh       下载渲染用的室内 HDRI
 │
 ├── config/
 │   ├── energy_trace.yaml          组件参数示例
-│   └── grasp_sim.yaml             抓取仿真参数
+│   ├── grasp_sim.yaml             抓取仿真参数
+│   └── pickup_plan.yaml           取矿动作规划的参数：场景、相机安装、观察姿态、各段时长和速度
 │
-├── launch/grasp_sim.launch.py     启动抓取仿真（MoveIt、仿真节点、RViz）
+├── launch/
+│   ├── grasp_sim.launch.py        启动抓取仿真（MoveIt、仿真节点、RViz）
+│   └── pickup_plan.launch.py      启动 move_group 和取矿动作规划，规划完自动退出
 ├── rviz/grasp_sim.rviz            抓取仿真的 RViz 配置
 ├── meshes/energy_unit.stl         能量单元的 mesh
 ├── assets/                        运行所需的网络和 M3T 模型，由 download_assets.sh 下载，不进入仓库
@@ -270,33 +276,78 @@ yolo segment train model=yolo11n-seg.pt data=yolo/data.yaml imgsz=640 epochs=100
 
 ## 连续序列
 
-`render_sequence.py` 在 Blender 中渲染一段连续的 RGB-D 序列，用来离线回放整条位姿估计流程。场景用 `render_dataset.py` 的搭建函数，整段序列只搭建一次，中心块上至少有 3 根能量单元。用 Blender 自带的 Python 运行：
+`render_sequence.py` 在 Blender 中渲染一段连续的 RGB-D 序列，用来离线回放整条位姿估计流程。场景用 `render_dataset.py` 的搭建函数，整段序列只搭建一次。灯光、HDRI、地上的单元、干扰物和镜头效果按 `--seed` 随机，镜头效果和曝光整段相同。用 Blender 自带的 Python 运行：
 
 ```zsh
 blender --background --factory-startup --python scripts/synth/render_sequence.py -- \
-    --out dataset/synthetic/sequences/seq_000 [--frames 200] [--seed 0] [--width 1280] \
-    [--height 720] [--samples 32] [--device CPU] [--hdri-dir dataset/synthetic/hdri]
+    --out dataset/synthetic/sequences/seq_000 [--plan <规划文件>] [--frames 200] [--seed 0] \
+    [--width 1280] [--height 720] [--samples 32] [--device CPU] [--hdri-dir dataset/synthetic/hdri]
 ```
 
-相机模拟装在机械臂上的 RGB-D 相机（水平视场角 69°），每帧有约 2 mm、0.3° 的抖动，分三段运动：
+已有 `meta/` 的帧会跳过，中断后用同一条命令继续。
+
+**按规划渲染。** 给出 `--plan` 时，机械臂按规划文件中每帧的关节角摆放，各连杆用 `arm_description` 包的 STL。相机装在规划文件指定的连杆上，画面里能看到真实的前臂和夹爪。中心块的位姿和各安装位有没有单元也取自规划文件，目标单元在被夹住的帧随 `link_6` 运动。帧数、分辨率和视场角都由规划文件决定，`--frames`、`--width`、`--height` 不起作用。规划文件是 JSON：
+
+| 字段 | 内容 |
+|---|---|
+| `fps` | 帧率 |
+| `base` | 底座（URDF 根连杆）到世界的 4 × 4 位姿 |
+| `hub.pose` | 中心块到世界的 4 × 4 位姿。中心块系：原点在中心，x 右，y 朝后，z 上 |
+| `hub.slots` | 6 个布尔值，第 k 个安装位（方向 30° + 60°·k）有没有单元 |
+| `hub.target` | 目标单元所在的安装位 |
+| `camera.link`、`camera.pose` | 相机所在的连杆，以及相机（OpenCV 坐标系）到该连杆的 4 × 4 位姿 |
+| `camera.width`、`camera.height`、`camera.hfov_deg` | 分辨率和水平视场角 |
+| `camera.bracket` | 可选：支架折线（该连杆坐标系中的点列），只用于画出支架 |
+| `frames[]` | 每帧的 `joints`（6 个关节角，rad）、`phase`（阶段名）和 `attached`（目标是否已被夹住） |
+
+世界坐标系：z 朝上，地面为 z = 0，中心块正面朝 -y，机器人在 -y 一侧。相机装在云台上时，`camera.link` 取底座，`camera.pose` 包含云台的俯仰和偏航。
+
+**内置轨迹。** 不给 `--plan` 时，中心块上至少有 3 根能量单元，相机（水平视场角 69°）按内置轨迹运动，每帧有约 2 mm、0.3° 的抖动，分三段：
 
 1. 前 20% 的帧：停在中心块前方约 1.1 m 处，视线左右扫过中心块；
 2. 到 75% 的帧：接近中心块上的目标单元，停在单元外侧约 0.3 m 处；
 3. 其余帧：取出目标单元，单元和相机一起沿单元轴线向外移动 12 cm。
 
-从 50% 的帧起，两根深色的夹爪从画面下边缘伸进来。镜头效果和曝光整段相同。已有 `meta/` 的帧会跳过，中断后用同一条命令继续。
+从 50% 的帧起，两根深色的方块从画面下边缘伸进来，代替夹爪。
 
 每段序列一个目录，帧号补零到 6 位：
 
 | 路径 | 内容 |
 |---|---|
-| `sequence.json` | 相机内参、`depth_scale`、目标单元的编号 `target`、帧数 `frames` 和用到的效果 |
+| `sequence.json` | 相机内参、`depth_scale`、目标单元的编号 `target`、帧数 `frames` 和用到的效果；按规划渲染时还有规划文件的路径 `plan` 和帧率 `fps` |
 | `color/<帧号>.jpg` | 彩色图 |
 | `depth/<帧号>.png` | 深度图：16 位无符号整数，单位 mm，沿光轴的平面深度，0 表示没有深度（更远于 10 m 的像素也记为 0） |
 | `index/<帧号>.png` | 每个像素属于第几根能量单元，0 为其他物体 |
-| `meta/<帧号>.json` | 每根单元的 `index`、`where` 和 `pose` |
+| `meta/<帧号>.json` | 每根单元的 `index`、`where` 和 `pose`，相机（OpenCV 坐标系）到世界的位姿 `camera`；按规划渲染时还有这一帧的 `joints`、`phase` 和 `attached` |
 
 `pose` 是 4 × 4 行优先矩阵，mesh 到相机，OpenCV 相机坐标系，单位 m。原点在能量单元的包围盒中心，z 轴指向封闭端，与 `geometry::load_binary_stl` 相同。镜头效果只作用于彩色图，深度图和编号图不受影响。
+
+## 取矿动作规划
+
+`pickup_plan` 在中心块场景里用 MoveIt 规划机械臂取矿的全过程，导出规划文件，供 `render_sequence.py --plan` 渲染：
+
+```zsh
+ros2 launch rmcs_energy_trace pickup_plan.launch.py [output_dir:=<目录>] [use_rviz:=true]
+```
+
+参数在 `config/pickup_plan.yaml`。默认生成 3 份规划：种子 0、1、2，目标安装位依次为 1（正上方）、0（右上）、4（正下方），输出到 `dataset/synthetic/plans/plan_slot<k>_seed<s>.json`。场景的坐标约定与规划文件相同（见“连续序列”）。目标安装位一定有单元，其余各以 0.7 的概率有单元（按种子）。
+
+规划按实际操作流程分 4 段：操作手停车、把准心对准目标、按下按钮后，机械臂先静止等视觉确认，再开始取矿。
+
+1. `hold`：2.0 s，静止在观察姿态。
+2. `approach`：OMPL 规划到预抓取位姿，再走直线到抓取位姿。抓取时 TCP（link_6 原点，夹爪两指中间）在单元中心，link_6 的 x 轴平行于单元长轴，夹爪从机器人一侧垂直于长轴接近（接近方向为 link_6 的 -z），预抓取位姿沿 link_6 的 +z 后退 0.10 m。直线段允许 link_6 与目标接触，link_5 不允许。
+3. `grasp`：0.3 s 静止，目标附着到 link_6，规划文件中 `attached` 从这一段起为 true。
+4. `extract`：沿单元长轴向外直线拉出 0.12 m。单元的开口端套在柱子上约 100 mm，拉出 0.12 m 才能完全脱离。
+
+时间参数化用 TOTG，速度和加速度缩放 0.3，再按 30 fps 重采样关节角。
+
+**观察姿态。** 底座离地 0.4 m，q1 = q6 = 0。底盘朝向负责水平对准，q2、q3 负责竖直对准：光轴穿过对准点，对准点是目标中心加随机偏移（水平 ±3 cm、竖直 ±2 cm，按种子），因为实际中操作手不可能把准心完全对准。q2 在关节范围内扫描，q3 和底盘朝向由对准条件解出。q4 在 {0, +90°, -90°, 180°}、q5 在 {±1.2, ±1.57} rad 中逐个组合试，留下对准有解、无碰撞、并且相机看得见目标的候选，取离预抓取姿态最近的一个。“看得见”的判据：从光心到目标中心画一个半径 0.04 m 的圆柱，靠目标一端缩短 0.08 m，它不与 link_4、link_5、link_6 碰撞。这个圆柱检查完立即移除，不参与后面的运动规划。
+
+**底座距离。** 底座到目标的水平距离取“预抓取、抓取、拉出都可达、无碰撞且视线不被挡”的最长连续区间的中点，扫描范围 0.3～1.1 m。
+
+**相机。** 装在 link_3 上（肘部右侧支架顶端），参数在配置文件中：光心 (0.13, 0.03, -0.10)，光轴指向 (0.03, 0.75, 0.035)，图像下方为 -x，分辨率 1280 × 720，水平视场角 69°。这些参数连同支架折线写入规划文件的 `camera` 字段。
+
+规划工具会打印底座位姿、观察姿态、相机到目标的距离、目标中心在图像中的像素位置、各段时长和帧数、相机最大速度，以及 `approach` 和 `extract` 段中目标在相机坐标系中每帧的最大移动和转角。OMPL 每次的结果不同，所以重新生成时预抓取段的关节角会有差异；底座位姿和观察姿态是确定的。
 
 ## 分割（SAM）
 

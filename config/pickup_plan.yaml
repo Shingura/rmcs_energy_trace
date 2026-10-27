@@ -1,0 +1,77 @@
+# 取矿动作规划参数 (pickup_plan)。世界系：z 朝上，地面 z = 0，中心块不旋转，正面朝 -y；单位 m / rad / s
+pickup_plan:
+  ros__parameters:
+    # 能量单元 mesh（STL，单位 mm），留空时使用包内的 meshes/energy_unit.stl
+    mesh_path: ""
+
+    # 要生成的规划：seeds[i] 与 target_slots[i] 配对。种子决定其余安装位有没有单元和对准点的随机偏移
+    seeds: [0, 1, 2]
+    target_slots: [1, 0, 4]
+    # 目标之外的安装位有单元的概率
+    slot_probability: 0.7
+    # 输出目录，文件名 plan_slot<k>_seed<s>.json；留空时为 <包目录>/dataset/synthetic/plans
+    output_dir: ""
+
+    # 中心块：中心位置、六棱柱对边距的一半、厚度；单元中心到中心块中心的距离
+    hub.center: [0.0, 0.0, 0.7]
+    hub.apothem: 0.095
+    hub.thickness: 0.102
+    hub.unit_offset: 0.15
+
+    # 底座（URDF 根连杆原点）离地高度
+    base.height: 0.4
+
+    # 规划文件的帧率；各段时长
+    fps: 30.0
+    hold_time: 2.0
+    grasp_time: 0.3
+    # MoveIt 时间最优（TOTG）的速度、加速度缩放和路径容差
+    velocity_scaling: 0.3
+    acceleration_scaling: 0.3
+    path_tolerance: 0.1
+    planning_time: 5.0
+    planning_attempts: 5
+
+    # 观察姿态：q1 = q6 = 0，q4、q5 在候选集合里逐个试（q4 取 0、±90°、180°，q5 取 ±1.2、±1.57 rad），
+    # 在对准有解、无碰撞、相机看得见目标的候选里取离预抓取姿态最近的；
+    # 对准点相对目标中心的随机偏移范围（水平沿世界 x，竖直沿世界 z，均匀分布）
+    observe.q4_candidates: [0.0, 1.5707963, -1.5707963, 3.1415926]
+    observe.q5_candidates: [-1.57, -1.2, 1.2, 1.57]
+    observe.aim_horizontal: 0.03
+    observe.aim_vertical: 0.02
+    # 视线检查：从光心到目标中心的圆柱（半径，靠目标一端缩短的长度）不能与 link_4、link_5、link_6 碰撞
+    observe.sight_radius: 0.04
+    observe.sight_shorten: 0.08
+
+    # 底座离目标的水平距离的搜索范围和步长：取预抓取、抓取、拉出都可达且无碰撞的最长连续区间的中点
+    distance.min: 0.3
+    distance.max: 1.1
+    distance.step: 0.05
+
+    # 抓取：TCP 偏移在 link_6 系下，预抓取沿 link_6 +z 后退，拉出沿单元长轴向外
+    grasp.tcp_offset: [0.0, 0.0, 0.0]
+    grasp.pre_distance: 0.10
+    grasp.extract_distance: 0.12
+    grasp.azimuth_samples: 24
+    # 接近方向与"机器人一侧"方向的最大夹角（度）
+    grasp.max_approach_angle_deg: 60.0
+    grasp.eef_step: 0.005
+    grasp.min_fraction: 0.999
+    grasp.ik_timeout: 0.02
+    # 直线段相邻步的关节角最大跳变（rad），超过视为 IK 换了一支
+    grasp.jump_threshold: 0.5
+    # 每个距离最多找几个抓取方案（再从中选离观察姿态最近的）
+    grasp.solutions_per_distance: 3
+    # 接近/拉出阶段允许夹爪 link_6 与目标单元接触，手腕 link_5 不允许
+    grasp.allow_link_contact: true
+
+    # 相机（装在 link_3 上）。以下坐标都在 link_3 系：光心、光轴指向的点、图像下方向
+    camera.link: link_3
+    camera.position: [0.13, 0.03, -0.10]
+    camera.target: [0.03, 0.75, 0.035]
+    camera.down: [-1.0, 0.0, 0.0]
+    camera.width: 1280
+    camera.height: 720
+    camera.hfov_deg: 69.0
+    # 支架折线（link_3 系中的点列，依次三个数一个点），只用于画图
+    camera.bracket: [0.03, 0.03, -0.005, 0.03, 0.03, -0.10, 0.12, 0.03, -0.10]

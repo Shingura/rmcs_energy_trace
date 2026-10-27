@@ -201,6 +201,29 @@ else()
   message(STATUS "MoveIt not found, skip grasp_sim")
 endif()
 
+# 可选：取矿动作规划（需要 MoveIt，缺失时跳过）
+if(moveit_ros_planning_interface_FOUND AND tf2_eigen_FOUND AND moveit_msgs_FOUND
+   AND shape_msgs_FOUND AND geometry_msgs_FOUND AND ament_index_cpp_FOUND)
+  add_executable(pickup_plan tool/pickup_plan/pickup_plan.cpp)
+  target_include_directories(pickup_plan PRIVATE ${PROJECT_SOURCE_DIR}/tool/grasp_sim)
+  target_compile_definitions(pickup_plan PRIVATE
+    RMCS_ENERGY_TRACE_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+  )
+  target_link_libraries(pickup_plan PRIVATE ${PROJECT_NAME})
+  ament_target_dependencies(pickup_plan PUBLIC
+    moveit_ros_planning_interface
+    tf2_eigen
+    shape_msgs
+    moveit_msgs
+    geometry_msgs
+    ament_index_cpp
+    rclcpp
+  )
+  install(TARGETS pickup_plan DESTINATION lib/${PROJECT_NAME})
+else()
+  message(STATUS "MoveIt not found, skip pickup_plan")
+endif()
+
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
 

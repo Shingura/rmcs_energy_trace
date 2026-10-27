@@ -273,15 +273,18 @@ def build_zone(rng):
     return half_width, back, height
 
 
-def build_hub(rng, mesh, units):
+def build_hub(rng, mesh, units, matrix=None, slots=None):
     """中心块：倒角的六棱柱，正面凹进一个六边形，边角有白色面板。各安装位随机装上能量单元，
-    空着的安装位露出柱子。正面朝 -y（机器人一侧）"""
-    matrix = (
-        Matrix.Translation((0.0, 0.0, HUB_HEIGHT + rng.uniform(-0.02, 0.02)))
-        @ Matrix.Rotation(math.radians(rng.uniform(-15.0, 15.0)), 4, "Z")
-        @ Matrix.Rotation(math.radians(rng.uniform(-8.0, 8.0)), 4, "X")
-        @ Matrix.Rotation(math.radians(rng.uniform(0.0, 60.0)), 4, "Y")
-    )
+    空着的安装位露出柱子。正面朝 -y（机器人一侧）。
+    matrix 给定时用它作中心块的位姿（中心块系：原点在中心，x 右，y 朝后，z 上），否则随机；
+    slots 给定时（6 个布尔值）按它决定第 k 个安装位有没有单元，否则随机。单元记录所在的安装位 slot"""
+    if matrix is None:
+        matrix = (
+            Matrix.Translation((0.0, 0.0, HUB_HEIGHT + rng.uniform(-0.02, 0.02)))
+            @ Matrix.Rotation(math.radians(rng.uniform(-15.0, 15.0)), 4, "Z")
+            @ Matrix.Rotation(math.radians(rng.uniform(-8.0, 8.0)), 4, "X")
+            @ Matrix.Rotation(math.radians(rng.uniform(0.0, 60.0)), 4, "Y")
+        )
 
     radius = HUB_APOTHEM / math.cos(math.radians(30.0))
     bm = bmesh.new()
@@ -334,17 +337,18 @@ def build_hub(rng, mesh, units):
 
     pillar = principled("pillar", gray(rng.uniform(0.1, 0.5)), rng.uniform(0.2, 0.6),
                         metallic=rng.uniform(0.0, 1.0))
-    occupancy = rng.uniform(0.2, 1.0)
+    occupancy = rng.uniform(0.2, 1.0) if slots is None else None
     for k in range(6):
         angle = math.radians(30 + 60 * k)
         direction = (matrix.to_3x3() @ Vector((math.cos(angle), 0.0, math.sin(angle)))).normalized()
         center = matrix.translation
-        if rng.random() < occupancy:
+        if (rng.random() < occupancy) if slots is None else slots[k]:
             jitter = Vector([rng.gauss(0.0, 0.002) for _ in range(3)])
             add_unit(rng, mesh, units,
                      unit_matrix(center + direction * UNIT_CENTER_RADIUS + jitter, direction,
                                  rng.uniform(0.0, 2 * math.pi)),
                      "hub")
+            units[-1]["slot"] = k
         else:
             rotation = direction.to_track_quat("Z", "Y").to_matrix().to_4x4()
             add_cylinder(f"pillar_{k}", 0.017, 0.08, pillar,
