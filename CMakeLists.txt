@@ -132,6 +132,15 @@ target_compile_definitions(mask_ablation PRIVATE
 )
 install(TARGETS mask_ablation DESTINATION lib/${PROJECT_NAME})
 
+# 离线回放：在渲染的连续 RGB-D 序列上运行整条流程，输出叠加画面的视频和相对真值的误差
+add_executable(sequence_replay tool/sequence_replay.cpp)
+target_link_libraries(sequence_replay PRIVATE ${PROJECT_NAME})
+target_compile_definitions(sequence_replay PRIVATE
+  RMCS_ENERGY_UNIT_MESH="${PROJECT_SOURCE_DIR}/meshes/energy_unit.stl"
+  RMCS_ENERGY_TRACE_ASSET_DIR="${PROJECT_SOURCE_DIR}/assets"
+)
+install(TARGETS sequence_replay DESTINATION lib/${PROJECT_NAME})
+
 if(RMCS_ENERGY_TRACE_BUILD_M3T_TOOLS)
   # 不链接 ${PROJECT_NAME}：它含有 m3t_runtime（OpenGL 占位头文件），与 m3t_full 的真实 OpenGL 冲突。
   # 工具只需要读 mesh 和写 OBJ，直接编译这两个源文件

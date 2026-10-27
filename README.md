@@ -54,6 +54,9 @@ rmcs_energy_trace/
 │   ├── supervision/               判断跟踪结果是否可信
 │   │   └── supervisor.hpp/.cpp    Supervisor：每帧的健康检查和“搜索 / 跟踪”状态机
 │   │
+│   ├── pipeline/                  把各模块串成完整流程
+│   │   └── pipeline.hpp/.cpp      Pipeline：每帧输入彩色图和深度图，输出状态、位姿、是否可信和诊断信息
+│   │
 │   ├── geometry/                  各模块共用的几何类型
 │   │   ├── mesh.hpp/.cpp          读取二进制 STL（mm 转 m，原点移到中心），在表面均匀采样
 │   │   ├── camera.hpp             Camera：RGB-D 相机的分辨率、内参和深度单位
@@ -76,6 +79,7 @@ rmcs_energy_trace/
 ├── tool/                          离线工具
 │   ├── energy_unit_detect.cpp     对图片或目录运行检测（可选再用 SAM 分割），保存画好框和掩码的图片
 │   ├── mask_ablation.cpp          对比实验：配准时只用检测框和加掩码的效果
+│   ├── sequence_replay.cpp        在渲染的连续 RGB-D 序列上运行 Pipeline，输出叠加画面的视频和相对真值的误差
 │   ├── m3t_generate.cpp           生成 M3T 模型文件（需要 OpenGL 和显示，默认不构建）
 │   └── grasp_sim/                 MoveIt 抓取仿真
 │       ├── grasp_sim.cpp          仿真主程序：渲染、配准、生成抓取候选、规划并回放
@@ -95,6 +99,7 @@ rmcs_energy_trace/
 │   ├── export_sam.py              把 SAM 的官方权重导出为编码器和解码器两个 ONNX 网络
 │   └── synth/                     检测网络的合成训练数据
 │       ├── render_dataset.py      在 Blender 中随机搭建取矿场景，渲染彩色图和编号图
+│       ├── render_sequence.py     渲染一段连续的 RGB-D 序列，供 sequence_replay 回放
 │       ├── make_yolo_dataset.py   把渲染结果转换成 Ultralytics 的分割数据集
 │       └── download_hdri.sh       下载渲染用的室内 HDRI
 │
@@ -141,7 +146,7 @@ scripts/download_assets.sh
 dataset/
 ├── images/                        测试图片
 ├── networks/                      原始权重：YOLO 的 .pt、SAM 官方权重 sam_vit_b_01ec64.pth
-└── synthetic/                     合成训练数据：HDRI、渲染结果、数据集和训练输出
+└── synthetic/                     合成数据：HDRI、渲染结果、数据集、训练输出、连续序列（sequences/）和回放输出（replay/）
 ```
 
 ## 配准
@@ -263,6 +268,36 @@ yolo segment train model=yolo11n-seg.pt data=yolo/data.yaml imgsz=640 epochs=100
 
 训练命令里的 `project=` 要写绝对路径。写相对路径时，Ultralytics 8.3.251 会把输出放到 `~/runs/<任务类型>/` 下。
 
+## 连续序列
+
+`render_sequence.py` 在 Blender 中渲染一段连续的 RGB-D 序列，用来离线回放整条位姿估计流程。场景用 `render_dataset.py` 的搭建函数，整段序列只搭建一次，中心块上至少有 3 根能量单元。用 Blender 自带的 Python 运行：
+
+```zsh
+blender --background --factory-startup --python scripts/synth/render_sequence.py -- \
+    --out dataset/synthetic/sequences/seq_000 [--frames 200] [--seed 0] [--width 1280] \
+    [--height 720] [--samples 32] [--device CPU] [--hdri-dir dataset/synthetic/hdri]
+```
+
+相机模拟装在机械臂上的 RGB-D 相机（水平视场角 69°），每帧有约 2 mm、0.3° 的抖动，分三段运动：
+
+1. 前 20% 的帧：停在中心块前方约 1.1 m 处，视线左右扫过中心块；
+2. 到 75% 的帧：接近中心块上的目标单元，停在单元外侧约 0.3 m 处；
+3. 其余帧：取出目标单元，单元和相机一起沿单元轴线向外移动 12 cm。
+
+从 50% 的帧起，两根深色的夹爪从画面下边缘伸进来。镜头效果和曝光整段相同。已有 `meta/` 的帧会跳过，中断后用同一条命令继续。
+
+每段序列一个目录，帧号补零到 6 位：
+
+| 路径 | 内容 |
+|---|---|
+| `sequence.json` | 相机内参、`depth_scale`、目标单元的编号 `target`、帧数 `frames` 和用到的效果 |
+| `color/<帧号>.jpg` | 彩色图 |
+| `depth/<帧号>.png` | 深度图：16 位无符号整数，单位 mm，沿光轴的平面深度，0 表示没有深度（更远于 10 m 的像素也记为 0） |
+| `index/<帧号>.png` | 每个像素属于第几根能量单元，0 为其他物体 |
+| `meta/<帧号>.json` | 每根单元的 `index`、`where` 和 `pose` |
+
+`pose` 是 4 × 4 行优先矩阵，mesh 到相机，OpenCV 相机坐标系，单位 m。原点在能量单元的包围盒中心，z 轴指向封闭端，与 `geometry::load_binary_stl` 相同。镜头效果只作用于彩色图，深度图和编号图不受影响。
+
 ## 分割（SAM）
 
 `segmentation::Segmenter` 用 SAM（Segment Anything 的 ViT-B 版本）以检测框为提示分割目标，用 OpenVINO 在 CPU 上推理。网络从 Meta 的官方权重导出：
@@ -328,6 +363,63 @@ env -u WAYLAND_DISPLAY DISPLAY=:0 /workspaces/RMCS/rmcs_ws/build/rmcs_energy_tra
 只有健康帧能清零计数。自上一个健康帧起，不健康的帧累计 5 帧，或没有健康帧（不健康或无法判断）的帧累计 30 帧（例如目标离开视野），就回到搜索状态，要求重新初始化；两类帧不要求连续。被判为跳变的帧，其位姿不作为下一帧跳变检查的基准，所以跟踪器停在新位置时，每一帧都判为跳变。跳变、IoU 和 5 帧这几个阈值沿用 RCIA_Benmao_Vision 的默认值。
 
 `test_supervision` 用构造的观测测试状态机。`test_depth_mask` 用手工构造的小 mesh 测试 `DepthCheck::end_in_image_ratio`。`test_tracking` 把监督接在 M3T 上：正常跟踪时不应要求重新初始化，至少 95% 的帧可信；能量单元在第 75 帧离开画面后，要在 5 帧之内要求重新初始化。
+
+## 完整流程
+
+`pipeline::Pipeline` 把检测、掩码、配准、跟踪和监督串成一条流程。`Config` 组合各模块已有的 Config，另有相机、mesh 路径和掩码来源。`initialize` 加载所有网络和模型，任何一步失败都返回错误。`process(bgr, depth)` 处理一帧：`bgr` 是 `CV_8UC3`，`depth` 是 `CV_16UC1`，尺寸都等于 `Config::camera`。
+
+`process` 返回处理这一帧时所处的状态（搜索或跟踪）、位姿（可选）、位姿是否可信，以及诊断信息：全部检测、选中的检测、用到的掩码、配准结果、监督的观测和判断、各阶段耗时。一个实例只能在一个线程里调用，不是线程安全的。一帧要几十到几百毫秒，所以组件应该在工作线程里调用它。
+
+搜索状态每帧做这些事：
+
+1. 运行检测。选检测框中心离画面中心 ((width - 1) / 2, (height - 1) / 2) 最近的一个，每帧只对它配准。操作手对准目标后才启动自动取矿，所以选最靠近准心的。掩码来源为分割网络时，跳过没有掩码的检测。
+2. 取掩码，用检测框和掩码做配准。
+3. 配准通过后，用配准的位姿启动 Tracker 和 Supervisor，进入跟踪状态。这一帧输出配准的位姿，记为可信，因为配准自己已经做过深度检查。
+
+跟踪状态每帧做这些事：
+
+1. Tracker 处理这一帧，同一帧也运行检测。
+2. 用 `DepthCheck::projected_box` 得到跟踪位姿的投影框，在检测框中取与它 IoU 最大的一个，作为监督的检测 IoU。这一帧没有检测时不给。
+3. 用 `DepthCheck` 检查跟踪位姿，ROI 用投影框，不用掩码；再用 `DepthCheck::end_in_image_ratio` 算 mesh 两端的画面内面积比例。
+4. 把位姿、深度检查、检测 IoU 和端部画面内比例交给 Supervisor。监督要求重新初始化时，回到搜索状态，这一帧的位姿不可信。
+
+掩码来源由 `Config::mask_source` 选择：
+
+| 取值 | 掩码 | 说明 |
+|---|---|---|
+| `kNetwork` | 分割网络自带的掩码 | 网络是检测网络、没有掩码头时，`initialize` 返回错误 |
+| `kSam` | 以检测框为提示，用 SAM 分割 | 需要配置 `segmenter`。SAM 失败时这一帧不配准，不退回只用框 |
+| `kNone` | 不用掩码 | 只用检测框 |
+
+流程本身不知道哪一根是任务要抓的目标，靠操作手启动前把准心对准它。准心附近有多根单元时，它可能选中别的单元。
+
+## 序列回放
+
+`sequence_replay` 在渲染的连续序列上运行 `Pipeline`，把结果与真值比较，并输出叠加画面的视频：
+
+```zsh
+ros2 run rmcs_energy_trace sequence_replay <序列目录> <输出目录> --network <network.xml> \
+    [--mask network|sam|none] [--sam <encoder.onnx> <decoder.onnx>] [--fps 30] \
+    [--depth-noise 1.5] [--frames N] [--no-video]
+```
+
+`--mask` 默认 `network`；用 `sam` 时要给 `--sam`。`--frames` 只处理前 N 帧。
+
+**模拟实时。** `--fps F` 大于 0 时，处理一帧用了 t 秒（`process` 的墙钟时间），下一帧取第 `i + max(1, ceil(t · F))` 帧，中间的帧记为跳过。这样初始化结束时，M3T 拿到的是相机已经移动过的新帧，与实机一致。`--fps 0` 处理每一帧，结果完全确定。
+
+**深度噪声。** 读入的深度图加高斯噪声，标准差为 `--depth-noise`（mm）乘 z²（z 单位 m），另有 0.5% 的像素随机置为无效。随机数种子由帧号决定，同一帧的噪声不随跳帧而变。`--depth-noise 0` 关闭噪声和无效像素。
+
+**与真值比较。** 每个有位姿输出的帧，找中心最近的真值单元，记录它的编号、是否为序列的目标单元、中心误差（mm）和长轴误差（两个 z 轴的夹角，0°～180°）。搜索状态下用到掩码时，再记录选中的掩码与该单元真值可见区域的 IoU。
+
+输出目录里有：
+
+| 文件 | 内容 |
+|---|---|
+| `frames.csv` | 每帧一行：是否处理、状态、是否可信、对应的真值单元、是否目标、误差、掩码 IoU、监督的判断和观测、各阶段耗时 |
+| `summary.txt` | 同时打印到终端。处理和跳过的帧数；第一次输出可信位姿的帧号；配准的尝试和成功次数；重新初始化的次数；首次可信之后可信帧的比例；可信帧的中心误差和长轴误差的中位数、90% 分位和最大值；错误接受的帧数（可信，但中心误差大于 10 mm 或长轴误差大于 5°）；各阶段平均耗时 |
+| `replay.mp4` | 处理过的帧，帧率 30。画面上有全部检测框（细线）、选中的框（粗线）、掩码（半透明）、估计位姿的轮廓（可信为绿色，不可信为黄色）、目标单元真值的轮廓（白色细线）和左上角的文字（帧号、状态、误差、总耗时） |
+
+轮廓是 mesh 顶点投影后的凸包。`VideoWriter` 打不开 `replay.mp4` 时，改为把每帧写成 `frames/<帧号>.jpg`，并在终端说明。跳过的帧不写入视频。
 
 ## 抓取仿真
 

@@ -1,0 +1,235 @@
+#include "pipeline/pipeline.hpp"
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <exception>
+#include <format>
+#include <utility>
+#include <vector>
+
+#include <opencv2/core.hpp>
+#include <openvino/runtime/core.hpp>
+
+#include "geometry/mesh.hpp"
+
+namespace rmcs_energy_trace::pipeline {
+
+namespace {
+
+using Clock = std::chrono::steady_clock;
+
+auto elapsed_ms(Clock::time_point from) noexcept -> double {
+    return std::chrono::duration<double, std::milli>(Clock::now() - from).count();
+}
+
+auto iou(const cv::Rect2f& a, const cv::Rect2f& b) noexcept -> double {
+    const auto inter = static_cast<double>((a & b).area());
+    const auto total = static_cast<double>(a.area()) + static_cast<double>(b.area()) - inter;
+    return total > 0. ? inter / total : 0.;
+}
+
+} // namespace
+
+struct Pipeline::Impl {
+    Config config;
+    bool initialized = false;
+
+    detection::Detector detector;
+    segmentation::Segmenter segmenter;
+    registration::Registration registration;
+    registration::DepthCheck depth_check;
+    tracking::Tracker tracker;
+    supervision::Supervisor supervisor;
+
+    State state = State::kSearching;
+
+    // 分割网络的输出有 2 个（检测和掩码原型），检测网络只有 1 个；Detector 没有公开这一信息
+    static bool network_has_mask(const std::string& path) {
+        auto core = ov::Core{};
+        return core.read_model(path)->outputs().size() == 2;
+    }
+
+    std::expected<void, std::string> initialize(const Config& new_config) {
+        initialized = false;
+        state = State::kSearching;
+        config = new_config;
+        config.tracker.camera = config.camera;
+
+        if (auto result = detector.initialize(config.detector); !result)
+            return std::unexpected{std::move(result.error())};
+        if (config.mask_source == MaskSource::kNetwork
+            && !network_has_mask(config.detector.network_path)) {
+            return std::unexpected{
+                "Mask source is the segmentation network, but the network has no mask head"};
+        }
+        if (config.mask_source == MaskSource::kSam) {
+            if (auto result = segmenter.initialize(config.segmenter); !result)
+                return std::unexpected{std::move(result.error())};
+        }
+        if (auto result = registration.initialize(config.mesh_path, config.registration); !result)
+            return std::unexpected{std::move(result.error())};
+        auto mesh = geometry::load_binary_stl(config.mesh_path);
+        if (!mesh)
+            return std::unexpected{std::move(mesh.error())};
+        depth_check = registration::DepthCheck{std::move(*mesh), config.depth_check};
+        if (auto result = tracker.initialize(config.tracker); !result)
+            return std::unexpected{std::move(result.error())};
+        supervisor = supervision::Supervisor{config.supervisor};
+
+        initialized = true;
+        return {};
+    }
+
+    // 取检测框中心离画面中心最近的：操作手对准目标后才启动取矿。
+    // 掩码来源为分割网络时跳过没有掩码的检测
+    std::optional<std::size_t> select(const detection::Detector::Detections& detections) const {
+        const auto center_x = (config.camera.width - 1) / 2.f;
+        const auto center_y = (config.camera.height - 1) / 2.f;
+        auto best = std::optional<std::size_t>{};
+        auto best_distance = 0.f;
+        for (std::size_t i = 0; i < detections.size(); i++) {
+            if (config.mask_source == MaskSource::kNetwork && detections[i].mask.empty())
+                continue;
+            const auto& box = detections[i].box;
+            const auto distance =
+                std::hypot(box.x + box.width / 2.f - center_x, box.y + box.height / 2.f - center_y);
+            if (!best || distance < best_distance) {
+                best_distance = distance;
+                best = i;
+            }
+        }
+        return best;
+    }
+
+    void search(const cv::Mat& bgr, const cv::Mat& depth, Result& result) {
+        auto& diag = result.diagnostics;
+        diag.selected = select(diag.detections);
+        if (!diag.selected)
+            return;
+        const auto& detection = diag.detections[*diag.selected];
+
+        switch (config.mask_source) {
+        case MaskSource::kNetwork: diag.mask = detection.mask; break;
+        case MaskSource::kSam: {
+            const auto begin = Clock::now();
+            if (auto segmented = segmenter.segment(bgr, detection.box))
+                diag.mask = std::move(segmented->mask);
+            diag.timing.segment_ms = elapsed_ms(begin);
+            // SAM 失败时不退化为只用框：框里有相邻单元，用框配准容易选错
+            if (diag.mask.empty())
+                return;
+            break;
+        }
+        case MaskSource::kNone: break;
+        }
+
+        const auto roi = cv::Rect2i{detection.box} & cv::Rect2i{0, 0, bgr.cols, bgr.rows};
+        if (roi.empty())
+            return;
+        auto begin = Clock::now();
+        diag.registration_attempted = true;
+        diag.registration = registration.register_depth(depth, config.camera, roi, diag.mask);
+        diag.timing.register_ms = elapsed_ms(begin);
+        if (!diag.registration)
+            return;
+
+        result.pose = diag.registration->pose;
+        begin = Clock::now();
+        const auto started = tracker.start(diag.registration->pose, bgr, depth);
+        diag.timing.track_ms = elapsed_ms(begin);
+        if (!started) {
+            // 跟踪器没有启动就不进入跟踪状态，下一帧重新配准
+            result.trusted = false;
+            return;
+        }
+        supervisor.start(diag.registration->pose);
+        state = State::kTracking;
+        // 配准自己的深度检查已经通过
+        result.trusted = true;
+    }
+
+    void track(const cv::Mat& bgr, const cv::Mat& depth, Result& result) {
+        auto& diag = result.diagnostics;
+        auto begin = Clock::now();
+        const auto tracked = tracker.track(bgr, depth);
+        diag.timing.track_ms = elapsed_ms(begin);
+        diag.tracker_ok = tracked.has_value();
+
+        begin = Clock::now();
+        auto observation = supervision::Supervisor::Observation{};
+        if (tracked) {
+            result.pose = tracked->pose;
+            observation.pose = tracked->pose;
+            diag.projected_box = depth_check.projected_box(config.camera, tracked->pose);
+            observation.depth =
+                depth_check.check(depth, config.camera, diag.projected_box, {}, tracked->pose);
+            observation.end_in_image_ratio =
+                depth_check.end_in_image_ratio(config.camera, tracked->pose);
+            // 与投影框 IoU 最大的检测；没有检测时不给
+            for (const auto& detection : diag.detections) {
+                const auto value = iou(cv::Rect2f{diag.projected_box}, detection.box);
+                if (!observation.detection_iou || value > *observation.detection_iou)
+                    observation.detection_iou = value;
+            }
+        }
+        const auto decision = supervisor.update(observation);
+        diag.timing.check_ms = elapsed_ms(begin);
+        diag.observation = observation;
+        diag.decision = decision;
+
+        result.trusted = decision.trusted && !decision.reinitialize;
+        if (decision.reinitialize)
+            state = State::kSearching;
+    }
+
+    std::expected<Result, std::string> process(const cv::Mat& bgr, const cv::Mat& depth) {
+        if (!initialized)
+            return std::unexpected{"Pipeline is not initialized"};
+        const auto size = cv::Size{config.camera.width, config.camera.height};
+        if (bgr.type() != CV_8UC3 || depth.type() != CV_16UC1 || bgr.size() != size
+            || depth.size() != size) {
+            return std::unexpected{std::format(
+                "Expected CV_8UC3 and CV_16UC1 images of {}x{}", size.width, size.height)};
+        }
+
+        const auto begin = Clock::now();
+        auto result = Result{};
+        result.state = state;
+        auto& diag = result.diagnostics;
+
+        // 搜索和跟踪状态都要检测
+        auto detect_begin = Clock::now();
+        diag.detections = detector.detect(bgr);
+        diag.timing.detect_ms = elapsed_ms(detect_begin);
+
+        if (state == State::kSearching)
+            search(bgr, depth, result);
+        else
+            track(bgr, depth, result);
+        diag.timing.total_ms = elapsed_ms(begin);
+        return result;
+    }
+};
+
+std::expected<void, std::string> Pipeline::initialize(const Config& config) noexcept try {
+    return pimpl_->initialize(config);
+} catch (const std::exception& e) {
+    return std::unexpected{std::string{"Failed to initialize pipeline: "} + e.what()};
+}
+
+std::expected<Pipeline::Result, std::string>
+    Pipeline::process(const cv::Mat& bgr, const cv::Mat& depth) noexcept try {
+    return pimpl_->process(bgr, depth);
+} catch (const std::exception& e) {
+    return std::unexpected{std::string{"Pipeline failed: "} + e.what()};
+}
+
+Pipeline::State Pipeline::state() const noexcept { return pimpl_->state; }
+
+Pipeline::Pipeline() noexcept
+    : pimpl_{std::make_unique<Impl>()} {}
+
+Pipeline::~Pipeline() noexcept = default;
+
+} // namespace rmcs_energy_trace::pipeline
