@@ -1,5 +1,5 @@
 // 工程机械臂取矿规划：在中心块场景里用 MoveIt 规划 观察 -> 接近 -> 抓取 -> 拉出 的整套动作，
-// 按固定帧率导出规划文件（JSON），供 scripts/synth/render_sequence.py --plan 渲染 RGB-D 序列。
+// 按固定帧率导出规划文件（JSON），供 scripts/blender/render_sequence.py --plan 渲染 RGB-D 序列。
 // 规划文件的格式见 render_sequence.py 开头的说明。
 #include "grasp_candidates.hpp"
 
@@ -273,7 +273,7 @@ private:
         c.slot_probability = param(n, "slot_probability", 0.7);
         c.output_dir = param<std::string>(n, "output_dir", "");
         if (c.output_dir.empty())
-            c.output_dir = std::string{RMCS_ENERGY_TRACE_SOURCE_DIR} + "/dataset/synthetic/plans";
+            c.output_dir = std::string{RMCS_ENERGY_TRACE_SOURCE_DIR} + "/dataset/plans";
 
         c.fps = param(n, "fps", 30.);
         c.hold_time = param(n, "hold_time", 2.0);

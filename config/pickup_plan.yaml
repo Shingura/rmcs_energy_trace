@@ -9,7 +9,7 @@ pickup_plan:
     target_slots: [1, 0, 4]
     # 目标之外的安装位有单元的概率
     slot_probability: 0.7
-    # 输出目录，文件名 plan_slot<k>_seed<s>.json；留空时为 <包目录>/dataset/synthetic/plans
+    # 输出目录，文件名 plan_slot<k>_seed<s>.json；留空时为 <包目录>/dataset/plans
     output_dir: ""
 
     # 中心块：中心位置、六棱柱对边距的一半、厚度；单元中心到中心块中心的距离

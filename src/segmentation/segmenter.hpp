@@ -12,7 +12,7 @@
 namespace rmcs_energy_trace::segmentation {
 
 // 用 SAM（Segment Anything，SAM1）以检测框为提示分割能量单元，用 OpenVINO 推理。
-// 网络由 scripts/export_sam.py 从官方权重导出为编码器和解码器两个 ONNX 文件。
+// 网络由 scripts/training/export_sam.py 从官方权重导出为编码器和解码器两个 ONNX 文件。
 // 预处理和后处理与官方 SamPredictor 一致；候选掩码的选法与官方 ONNX 部署代码（SamOnnxModel）
 // 对检测框提示的选法一致，见 segmenter.cpp。
 // 同一个实例不能在多个线程中同时调用 segment

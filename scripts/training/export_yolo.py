@@ -2,7 +2,7 @@
 """把 Ultralytics YOLO11 的 .pt 权重导出为 OpenVINO IR，供 energy_unit_detect 和组件使用。
 
 用法：
-    python3 scripts/export_yolo.py <best.pt> <输出目录>
+    python3 scripts/training/export_yolo.py <best.pt> <输出目录>
 
 导出参数固定为 imgsz=640、不含 NMS、不用半精度，与 C++ 解码器（输出 [1, 5, 8400]）一致。
 输出目录下会生成 <名称>_openvino_model/，其中的 .xml 就是 model_path。

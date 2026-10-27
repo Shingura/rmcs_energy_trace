@@ -2,7 +2,7 @@
 """把 Segment Anything（SAM1）的官方权重导出为两个 ONNX 网络，供 C++ 的 segmentation::Segmenter 使用。
 
 用法：
-    python3 scripts/export_sam.py <sam_vit_b_01ec64.pth> <输出目录> [--model-type vit_b]
+    python3 scripts/training/export_sam.py <sam_vit_b_01ec64.pth> <输出目录> [--model-type vit_b]
         [--check <图片> <x1,y1,x2,y2>]
 
 输出：

@@ -63,7 +63,7 @@ rmcs_energy_trace/
 │   │   ├── camera.hpp             Camera：RGB-D 相机的分辨率、内参和深度单位
 │   │   └── depth_cloud.hpp/.cpp   深度图在框（和掩码）内反投影为点云
 │   │
-│   ├── synthetic/                 合成数据，只供测试和离线工具使用
+│   ├── synthetic/                 C++ 简易渲染器生成的合成深度图和彩色图，只供测试使用
 │   │   └── depth_renderer.hpp/.cpp     按给定位姿渲染深度图、彩色图和实例编号图
 │   │
 │   └── utility/
@@ -97,14 +97,15 @@ rmcs_energy_trace/
 ├── scripts/
 │   ├── download_assets.sh         下载运行所需的网络和 M3T 模型到 assets/，并校验 SHA256
 │   ├── assets.sha256              要下载的文件清单和校验值
-│   ├── export_yolo.py             把 Ultralytics 的 .pt 权重导出为 OpenVINO 格式
-│   ├── export_sam.py              把 SAM 的官方权重导出为编码器和解码器两个 ONNX 网络
-│   └── synth/                     检测网络的合成训练数据
-│       ├── render_dataset.py      在 Blender 中随机搭建取矿场景，渲染彩色图和编号图
-│       ├── render_sequence.py     渲染一段连续的 RGB-D 序列，供 sequence_replay 回放；可按取矿规划驱动机械臂和相机
-│       ├── arm.py                 Blender 中的机械臂：读 URDF、正运动学、导入各连杆的 STL、相机支架
+│   ├── blender/                   在 Blender 自带的 Python 中运行
+│   │   ├── render_dataset.py      随机搭建取矿场景，渲染检测网络的训练图和编号图
+│   │   ├── render_sequence.py     渲染一段连续的 RGB-D 序列，供 sequence_replay 回放；可按取矿规划驱动机械臂和相机
+│   │   ├── arm.py                 机械臂：读 URDF、正运动学、导入各连杆的 STL、相机支架
+│   │   └── download_hdri.sh       下载渲染用的室内 HDRI
+│   └── training/                  在装有 Ultralytics 的 Python 环境中运行
 │       ├── make_yolo_dataset.py   把渲染结果转换成 Ultralytics 的分割数据集
-│       └── download_hdri.sh       下载渲染用的室内 HDRI
+│       ├── export_yolo.py         把 Ultralytics 的 .pt 权重导出为 OpenVINO 格式
+│       └── export_sam.py          把 SAM 的官方权重导出为编码器和解码器两个 ONNX 网络
 │
 ├── config/
 │   ├── energy_trace.yaml          组件参数示例
@@ -136,7 +137,7 @@ scripts/download_assets.sh
 
 | 文件 | 大小 | 用途 | 来源 |
 |---|---|---|---|
-| `sam_vit_b_encoder.onnx` | 约 343 MB | SAM 编码器 | Meta 官方权重，用 `scripts/export_sam.py` 导出 |
+| `sam_vit_b_encoder.onnx` | 约 343 MB | SAM 编码器 | Meta 官方权重，用 `scripts/training/export_sam.py` 导出 |
 | `sam_vit_b_decoder.onnx` | 约 16 MB | SAM 解码器 | 同上 |
 | `energy_unit.obj` | 约 106 KB | M3T 使用的 mesh | `m3t_generate` 生成 |
 | `energy_unit_region_model.bin`、`energy_unit_depth_model.bin` | 约 74 MB、70 MB | M3T 的区域模型和深度模型 | `m3t_generate` 生成，需要 OpenGL 和显示器 |
@@ -149,9 +150,14 @@ scripts/download_assets.sh
 
 ```text
 dataset/
-├── images/                        测试图片
-├── networks/                      原始权重：YOLO 的 .pt、SAM 官方权重 sam_vit_b_01ec64.pth
-└── synthetic/                     合成数据：HDRI、渲染结果、数据集、训练输出、连续序列（sequences/）和回放输出（replay/）
+├── real/images/                   实拍测试图片
+├── weights/                       外部下载的原始权重：SAM 官方权重 sam_vit_b_01ec64.pth、Ultralytics 预训练权重
+├── hdri/                          Blender 用的环境贴图
+├── train/                         检测网络的训练：render/<版本>/ 渲染结果，yolo/<版本>/ 数据集，runs/<版本>/ 训练输出
+├── models/                        导出、还没放进 Release 的网络（YOLO11n-seg 的 OpenVINO 模型）
+├── plans/                         取矿动作规划文件
+├── sequences/                     按规划渲染的 RGB-D 序列
+└── replay/                        sequence_replay 的输出
 ```
 
 ## 配准
@@ -207,7 +213,7 @@ ros2 run rmcs_energy_trace energy_unit_detect <network.xml> <图片或目录> <�
     [--sam <encoder.onnx> <decoder.onnx>]
 ```
 
-`network.xml` 由 `scripts/export_yolo.py` 从 Ultralytics 的 `.pt` 权重导出。
+`network.xml` 由 `scripts/training/export_yolo.py` 从 Ultralytics 的 `.pt` 权重导出。
 
 分割网络的掩码按 Ultralytics 的 `process_mask_native`（`retina_masks=True`）解码：掩码系数乘原型得到 160 × 160 的 logit，取出未填充图像的区域，双线性缩放到原图尺寸，logit 大于 0 的像素为目标，检测框以外置零。只对 NMS 之后保留的检测解码，并且只计算框内的像素。`Detector::Detection::mask` 的约定与 `Segmenter::Result::mask` 相同。`Timing::mask` 是掩码解码的耗时，不计入 `postprocess`。`test_detection` 用构造的输出张量测试解码，不需要网络文件。
 
@@ -215,7 +221,7 @@ ros2 run rmcs_energy_trace energy_unit_detect <network.xml> <图片或目录> <�
 
 ## 合成训练数据
 
-我们没有标注好的实拍图，检测网络用 Blender 渲染的合成图训练。脚本在 `scripts/synth/`，HDRI、渲染结果、数据集和训练输出都放在 `dataset/synthetic/` 下。
+我们没有标注好的实拍图，检测网络用 Blender 渲染的合成图训练。渲染脚本在 `scripts/blender/`，数据集和导出脚本在 `scripts/training/`。HDRI 放在 `dataset/hdri/`，渲染结果、数据集和训练输出放在 `dataset/train/` 下。
 
 每帧重新搭建一个取矿场景：
 
@@ -234,20 +240,22 @@ ros2 run rmcs_energy_trace energy_unit_detect <network.xml> <图片或目录> <�
 在包目录下按顺序运行：
 
 ```zsh
-# 1. 下载 13 个室内 HDRI（Poly Haven，CC0），已有的文件会跳过
-scripts/synth/download_hdri.sh
+# 1. 下载 13 个室内 HDRI（Poly Haven，CC0）到 dataset/hdri/，已有的文件会跳过
+scripts/blender/download_hdri.sh
 
 # 2. 渲染 2000 帧，--device 可选 CPU、CUDA、OPTIX
-blender --background --factory-startup --python scripts/synth/render_dataset.py -- \
-    --out dataset/synthetic/raw --count 2000 --seed 0 --device OPTIX
+blender --background --factory-startup --python scripts/blender/render_dataset.py -- \
+    --out dataset/train/render/v1 --count 2000 --seed 0 --device OPTIX
 
 # 3. 生成 Ultralytics 的分割数据集
-python3 scripts/synth/make_yolo_dataset.py dataset/synthetic/raw dataset/synthetic/yolo
+python3 scripts/training/make_yolo_dataset.py dataset/train/render/v1 dataset/train/yolo/v1
 
-# 4. 训练 YOLO11n-seg
-cd dataset/synthetic
-yolo segment train model=yolo11n-seg.pt data=yolo/data.yaml imgsz=640 epochs=100 batch=16 \
-    project=$PWD/runs name=v1
+# 4. 训练 YOLO11n-seg（预训练权重 yolo11n-seg.pt 第一次运行时自动下载）
+yolo segment train model=yolo11n-seg.pt data=$PWD/dataset/train/yolo/v1/data.yaml imgsz=640 \
+    epochs=100 batch=16 project=$PWD/dataset/train/runs name=v1
+
+# 5. 导出为 OpenVINO，供 C++ 检测器使用
+python3 scripts/training/export_yolo.py dataset/train/runs/v1/weights/best.pt dataset/models
 ```
 
 渲染每帧平均约 1.5 s（RTX 5060，OPTIX），只用 CPU 约 7.5 s（Ryzen 9600X）。已有结果的帧会跳过，中断后用同一条命令继续。每帧输出 4 个文件：
@@ -270,9 +278,9 @@ yolo segment train model=yolo11n-seg.pt data=yolo/data.yaml imgsz=640 epochs=100
 `render_sequence.py` 在 Blender 中渲染一段连续的 RGB-D 序列，用来离线回放整条位姿估计流程。场景用 `render_dataset.py` 的搭建函数，整段序列只搭建一次。灯光、HDRI、地上的单元、干扰物和镜头效果按 `--seed` 随机，镜头效果和曝光整段相同。用 Blender 自带的 Python 运行：
 
 ```zsh
-blender --background --factory-startup --python scripts/synth/render_sequence.py -- \
-    --out dataset/synthetic/sequences/seq_000 [--plan <规划文件>] [--frames 200] [--seed 0] \
-    [--width 1280] [--height 720] [--samples 32] [--device CPU] [--hdri-dir dataset/synthetic/hdri]
+blender --background --factory-startup --python scripts/blender/render_sequence.py -- \
+    --out dataset/sequences/<名称> [--plan <规划文件>] [--frames 200] [--seed 0] \
+    [--width 1280] [--height 720] [--samples 32] [--device CPU] [--hdri-dir dataset/hdri]
 ```
 
 已有 `meta/` 的帧会跳过，中断后用同一条命令继续。
@@ -321,7 +329,7 @@ blender --background --factory-startup --python scripts/synth/render_sequence.py
 ros2 launch rmcs_energy_trace pickup_plan.launch.py [output_dir:=<目录>] [use_rviz:=true]
 ```
 
-参数在 `config/pickup_plan.yaml`。默认生成 3 份规划：种子 0、1、2，目标安装位依次为 1（正上方）、0（右上）、4（正下方），输出到 `dataset/synthetic/plans/plan_slot<k>_seed<s>.json`。场景的坐标约定与规划文件相同（见“连续序列”）。目标安装位一定有单元，其余各以 0.7 的概率有单元（按种子）。
+参数在 `config/pickup_plan.yaml`。默认生成 3 份规划：种子 0、1、2，目标安装位依次为 1（正上方）、0（右上）、4（正下方），输出到 `dataset/plans/plan_slot<k>_seed<s>.json`。场景的坐标约定与规划文件相同（见“连续序列”）。目标安装位一定有单元，其余各以 0.7 的概率有单元（按种子）。
 
 规划按实际操作流程分 4 段：操作手停车、把准心对准目标、按下按钮后，机械臂先静止等视觉确认，再开始取矿。
 
@@ -345,10 +353,10 @@ ros2 launch rmcs_energy_trace pickup_plan.launch.py [output_dir:=<目录>] [use_
 `segmentation::Segmenter` 用 SAM（Segment Anything 的 ViT-B 版本）以检测框为提示分割目标，用 OpenVINO 在 CPU 上推理。网络从 Meta 的官方权重导出：
 
 ```zsh
-curl -L -o dataset/networks/sam_vit_b_01ec64.pth \
+curl -L -o dataset/weights/sam_vit_b_01ec64.pth \
     https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth
-python3 scripts/export_sam.py dataset/networks/sam_vit_b_01ec64.pth assets \
-    --check dataset/images/6.png 294.6,120.7,399.1,204.1
+python3 scripts/training/export_sam.py dataset/weights/sam_vit_b_01ec64.pth assets \
+    --check dataset/real/images/6.png 294.6,120.7,399.1,204.1
 ```
 
 导出需要 `torch`、`torchvision`、`segment-anything`、`onnx`、`onnxruntime` 和 `opencv-python`。权重只当作数据读取，不执行其中的代码。`--check` 用官方 `SamPredictor` 和导出的网络分割同一张图，打印两者掩码的 IoU。

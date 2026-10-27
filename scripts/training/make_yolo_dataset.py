@@ -2,7 +2,7 @@
 """把 render_dataset.py 的渲染结果转换成 Ultralytics 的实例分割数据集。
 
 用法：
-    python3 scripts/synth/make_yolo_dataset.py <渲染目录> <数据集目录> \\
+    python3 scripts/training/make_yolo_dataset.py <渲染目录> <数据集目录> \\
         [--val 0.1] [--min-pixels 300] [--min-visible 0.2] [--preview 20]
 
 每根能量单元的标签由它在 index 中的可见像素生成。可见像素少于 min-pixels，或者可见部分不到

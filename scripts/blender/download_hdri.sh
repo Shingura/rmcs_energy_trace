@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# 下载合成数据用的室内 HDRI 环境贴图（Poly Haven，CC0，2k，.hdr）到 dataset/synthetic/hdri/。
+# 下载合成数据用的室内 HDRI 环境贴图（Poly Haven，CC0，2k，.hdr）到 dataset/hdri/。
 # 已存在的文件会跳过，所以可以重复运行。
 #
-# 用法：scripts/synth/download_hdri.sh [--dir <目录>]
-#   --dir  下载到的目录，默认是包内的 dataset/synthetic/hdri/
+# 用法：scripts/blender/download_hdri.sh [--dir <目录>]
+#   --dir  下载到的目录，默认是包内的 dataset/hdri/
 # 有文件下载失败时，退出码为 1。
 
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-target_dir="$(dirname "$(dirname "${script_dir}")")/dataset/synthetic/hdri"
+target_dir="$(dirname "$(dirname "${script_dir}")")/dataset/hdri"
 base_url="https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k"
 
 # 大空间的室内场景：体育馆、大厅、厂房、机库

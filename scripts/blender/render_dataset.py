@@ -1,20 +1,20 @@
 """在 Blender 中渲染能量单元的合成训练数据。
 
 用法（在包目录下）：
-    blender --background --factory-startup --python scripts/synth/render_dataset.py -- \\
-        --out dataset/synthetic/raw --count 100 [--start 0] [--seed 0] [--samples 32] [--device CPU] \\
-        [--hdri-dir dataset/synthetic/hdri]
+    blender --background --factory-startup --python scripts/blender/render_dataset.py -- \\
+        --out dataset/train/render/v1 --count 100 [--start 0] [--seed 0] [--samples 32] [--device CPU] \\
+        [--hdri-dir dataset/hdri]
 
 每一帧重新搭建场景：资源区（地面、墙、底座、支架、中心块）、中心块上 0～6 根能量单元、
 地上的能量单元、干扰物和靠近相机的遮挡物；材质、光照和相机都随机；
-背景和环境光来自随机的 HDRI（scripts/synth/download_hdri.sh 下载，目录里没有 .hdr 时用深色背景）。
+背景和环境光来自随机的 HDRI（scripts/blender/download_hdri.sh 下载，目录里没有 .hdr 时用深色背景）。
 彩色图再按各自的概率叠加相机和镜头的效果（眩光、脏镜头、虚焦、运动模糊、雾化、暗角、色散、
 传感器噪声、曝光和白平衡），这些效果只作用于彩色图，编号图不受影响。每帧输出：
     images/<帧号>.jpg   彩色图
     index/<帧号>.png    每个像素属于第几根能量单元（0 为其他物体），即各单元的可见部分
     full/<帧号>.png     只渲染能量单元时的编号图，与 index 对比得到各单元被遮挡的比例
     meta/<帧号>.json    相机内参，各单元的位姿（mesh -> 相机，OpenCV 相机坐标系，单位 m），本帧用到的效果
-已有 meta 的帧会跳过，所以中断后可以继续。标签由 scripts/synth/make_yolo_dataset.py 生成。
+已有 meta 的帧会跳过，所以中断后可以继续。标签由 scripts/training/make_yolo_dataset.py 生成。
 """
 
 import argparse
@@ -61,7 +61,7 @@ def parse_args():
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--device", choices=("CPU", "CUDA", "OPTIX"), default="CPU")
-    parser.add_argument("--hdri-dir", type=Path, default=PACKAGE_DIR / "dataset" / "synthetic" / "hdri",
+    parser.add_argument("--hdri-dir", type=Path, default=PACKAGE_DIR / "dataset" / "hdri",
                         help="directory of .hdr environment maps")
     return parser.parse_args(argv)
 

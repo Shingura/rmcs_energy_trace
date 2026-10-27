@@ -1,9 +1,9 @@
 """在 Blender 中渲染一段连续的 RGB-D 序列，用来离线回放整条位姿估计流程。
 
 用法（在包目录下）：
-    blender --background --factory-startup --python scripts/synth/render_sequence.py -- \\
-        --out dataset/synthetic/sequences/seq_000 [--plan <规划文件>] [--frames 200] [--seed 0] \\
-        [--width 1280] [--height 720] [--samples 32] [--device CPU] [--hdri-dir dataset/synthetic/hdri]
+    blender --background --factory-startup --python scripts/blender/render_sequence.py -- \\
+        --out dataset/sequences/<名称> [--plan <规划文件>] [--frames 200] [--seed 0] \\
+        [--width 1280] [--height 720] [--samples 32] [--device CPU] [--hdri-dir dataset/hdri]
 
 场景用 render_dataset.py 的搭建函数，整段序列只搭建一次。镜头效果和曝光整段相同，相机每帧的随机种子不同。
 
@@ -70,7 +70,7 @@ def parse_args():
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--device", choices=("CPU", "CUDA", "OPTIX"), default="CPU")
-    parser.add_argument("--hdri-dir", type=Path, default=rd.PACKAGE_DIR / "dataset" / "synthetic" / "hdri")
+    parser.add_argument("--hdri-dir", type=Path, default=rd.PACKAGE_DIR / "dataset" / "hdri")
     return parser.parse_args(argv)
 
 
