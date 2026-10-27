@@ -124,14 +124,6 @@ add_executable(energy_unit_detect tool/energy_unit_detect.cpp)
 target_link_libraries(energy_unit_detect PRIVATE ${PROJECT_NAME})
 install(TARGETS energy_unit_detect DESTINATION lib/${PROJECT_NAME})
 
-# 离线消融工具：比较只用检测框与加实例掩码时的点云配准效果
-add_executable(mask_ablation tool/mask_ablation.cpp)
-target_link_libraries(mask_ablation PRIVATE ${PROJECT_NAME})
-target_compile_definitions(mask_ablation PRIVATE
-  RMCS_ENERGY_UNIT_MESH="${PROJECT_SOURCE_DIR}/meshes/energy_unit.stl"
-)
-install(TARGETS mask_ablation DESTINATION lib/${PROJECT_NAME})
-
 # 离线回放：在渲染的连续 RGB-D 序列上运行整条流程，输出叠加画面的视频和相对真值的误差
 add_executable(sequence_replay tool/sequence_replay.cpp)
 target_link_libraries(sequence_replay PRIVATE ${PROJECT_NAME})

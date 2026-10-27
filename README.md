@@ -79,7 +79,6 @@ rmcs_energy_trace/
 │
 ├── tool/                          离线工具
 │   ├── energy_unit_detect.cpp     对图片或目录运行检测（可选再用 SAM 分割），保存画好框和掩码的图片
-│   ├── mask_ablation.cpp          对比实验：配准时只用检测框和加掩码的效果
 │   ├── sequence_replay.cpp        在渲染的连续 RGB-D 序列上运行 Pipeline，输出叠加画面的视频和相对真值的误差
 │   ├── m3t_generate.cpp           生成 M3T 模型文件（需要 OpenGL 和显示，默认不构建）
 │   ├── pickup_plan/
@@ -137,13 +136,12 @@ scripts/download_assets.sh
 
 | 文件 | 大小 | 用途 | 来源 |
 |---|---|---|---|
-| `yolo11n_tars.xml`、`yolo11n_tars.bin` | 约 10 MB | YOLO 检测网络（OpenVINO） | TARS 开源的权重，用 `scripts/export_yolo.py` 导出 |
 | `sam_vit_b_encoder.onnx` | 约 343 MB | SAM 编码器 | Meta 官方权重，用 `scripts/export_sam.py` 导出 |
 | `sam_vit_b_decoder.onnx` | 约 16 MB | SAM 解码器 | 同上 |
 | `energy_unit.obj` | 约 106 KB | M3T 使用的 mesh | `m3t_generate` 生成 |
 | `energy_unit_region_model.bin`、`energy_unit_depth_model.bin` | 约 74 MB、70 MB | M3T 的区域模型和深度模型 | `m3t_generate` 生成，需要 OpenGL 和显示器 |
 
-文件放在 GitHub Release `assets-v1`。编译时 `assets/` 会安装到包的 share 目录，随安装目录一起同步到机器人；目录不存在时跳过，不影响编译。M3T 加载模型时只比较 OBJ 的文件名，所以 `assets/` 放在哪里都能用（见 `third_party/m3t/README.md`）。
+检测网络（YOLO11n-seg）暂时不在清单中，按“合成训练数据”一节训练并导出。文件放在 GitHub Release `assets-v1`。编译时 `assets/` 会安装到包的 share 目录，随安装目录一起同步到机器人；目录不存在时跳过，不影响编译。M3T 加载模型时只比较 OBJ 的文件名，所以 `assets/` 放在哪里都能用（见 `third_party/m3t/README.md`）。
 
 更新某个文件后，把新文件上传到 Release，再在 `assets/` 下运行 `sha256sum <文件名>`，用结果替换 `scripts/assets.sha256` 中对应的一行。
 
@@ -212,14 +210,6 @@ ros2 run rmcs_energy_trace energy_unit_detect <network.xml> <图片或目录> <�
 `network.xml` 由 `scripts/export_yolo.py` 从 Ultralytics 的 `.pt` 权重导出。
 
 分割网络的掩码按 Ultralytics 的 `process_mask_native`（`retina_masks=True`）解码：掩码系数乘原型得到 160 × 160 的 logit，取出未填充图像的区域，双线性缩放到原图尺寸，logit 大于 0 的像素为目标，检测框以外置零。只对 NMS 之后保留的检测解码，并且只计算框内的像素。`Detector::Detection::mask` 的约定与 `Segmenter::Result::mask` 相同。`Timing::mask` 是掩码解码的耗时，不计入 `postprocess`。`test_detection` 用构造的输出张量测试解码，不需要网络文件。
-
-掩码消融工具在合成深度图上比较点云配准只用检测框和再加实例掩码的效果。场景与测试 B 相同，并在目标旁放 1 到 2 个相邻的能量单元（间距 5、20 或 50 mm，直立或平躺，部分试验挡在目标前面）。每帧运行 3 种输入：只用框、框加精确掩码、框加模拟 YOLO-seg 的退化掩码，另有一组无相邻单元的对照。默认 40 次试验。
-
-```zsh
-ros2 run rmcs_energy_trace mask_ablation [--trials 40] [--seed 2025] [--mesh <energy_unit.stl>]
-```
-
-输出每次试验的误差和汇总表（成功率、拒绝次数、接受但错误的次数、中心和轴向误差的中位数与最大值、耗时）。`--trials 120` 约需 11 分钟。
 
 `geometry::depth_to_cloud` 把深度图在框（和掩码）内反投影为点云，掩码先按参数 `mask_erosion_px` 向内腐蚀（配准默认 3 px）。`test_depth_mask` 是它的单元测试。
 
