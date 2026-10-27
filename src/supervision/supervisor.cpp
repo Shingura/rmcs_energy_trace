@@ -89,6 +89,13 @@ Supervisor::Health Supervisor::judge(
         return Health::kBad;
     }
 
+    // 一端在画面外时，位姿沿轴线的位置没有约束，下面的深度统计也只覆盖画面内的部分
+    if (observation.end_in_image_ratio.has_value()
+        && *observation.end_in_image_ratio < config_.min_end_in_image_ratio) {
+        reason = "an end is outside the image";
+        return Health::kUnknown;
+    }
+
     // 只看未被遮挡的像素：支持和空闲空间违例
     const auto& depth = observation.depth;
     const auto unoccluded_ratio = depth.support_ratio + depth.free_space_ratio;

@@ -52,8 +52,18 @@ public:
     cv::Rect2i
         projected_box(const geometry::Camera& camera, const Eigen::Isometry3d& pose) const noexcept;
 
+    // mesh 两端表面按位姿投影后落在画面内的面积比例，取两端中较小的一个，不考虑自遮挡。
+    // mesh 原点在包围盒中心、z 为长轴：重心 |z| 大于半长一半（两端各 1/4 长度）的三角形属于端部，
+    // z > 0 和 z < 0
+    // 各算一端。每个端部按三角形面积加权，重心在相机前方且投影在图像范围内的算画面内。
+    // 能量单元的轴向位置只能靠两端约束，中段沿轴线滑动时深度几乎不变；一端出了画面，
+    // 跟踪器会沿轴线滑动，深度检查又只统计画面内的像素，看不出来
+    double end_in_image_ratio(
+        const geometry::Camera& camera, const Eigen::Isometry3d& pose) const noexcept;
+
 private:
     geometry::Mesh mesh_;
+    float half_length_ = 0.f; // mesh 在 z 方向的半长
     Config config_;
 };
 

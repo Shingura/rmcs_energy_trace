@@ -90,7 +90,18 @@ cv::Mat rasterize_depth(
 
 DepthCheck::DepthCheck(geometry::Mesh mesh, const Config& config) noexcept
     : mesh_{std::move(mesh)}
-    , config_{config} {}
+    , config_{config} {
+    auto lower = std::numeric_limits<float>::max();
+    auto upper = std::numeric_limits<float>::lowest();
+    for (const auto& triangle : mesh_.triangles) {
+        for (const auto& vertex : triangle) {
+            lower = std::min(lower, vertex.z());
+            upper = std::max(upper, vertex.z());
+        }
+    }
+    if (!mesh_.triangles.empty())
+        half_length_ = (upper - lower) / 2.f;
+}
 
 DepthCheck::Quality DepthCheck::check(
     const cv::Mat& depth, const geometry::Camera& camera, const cv::Rect2i& roi,
@@ -187,6 +198,34 @@ cv::Rect2i DepthCheck::projected_box(
     const auto bottom = static_cast<int>(std::ceil(upper.y()));
     return cv::Rect2i{left, top, right - left + 1, bottom - top + 1}
          & cv::Rect2i{0, 0, camera.width, camera.height};
+}
+
+double DepthCheck::end_in_image_ratio(
+    const geometry::Camera& camera, const Eigen::Isometry3d& pose) const noexcept {
+    const Eigen::Matrix3f rotation = pose.linear().cast<float>();
+    const Eigen::Vector3f translation = pose.translation().cast<float>();
+    // 下标 0 为 z < 0 的端部，1 为 z > 0 的端部
+    auto total = std::array<double, 2>{};
+    auto inside = std::array<double, 2>{};
+    for (const auto& triangle : mesh_.triangles) {
+        const Eigen::Vector3f centroid = (triangle[0] + triangle[1] + triangle[2]) / 3.f;
+        if (std::abs(centroid.z()) <= half_length_ / 2.f)
+            continue;
+        const auto end = centroid.z() > 0.f ? 1 : 0;
+        const auto area = static_cast<double>(geometry::Mesh::area(triangle));
+        total[end] += area;
+        const Eigen::Vector3f center = rotation * centroid + translation;
+        if (center.z() <= 0.f)
+            continue;
+        const auto u = camera.fx * center.x() / center.z() + camera.cx;
+        const auto v = camera.fy * center.y() / center.z() + camera.cy;
+        // 像素 (u, v) 的中心在投影坐标 (u, v)，图像覆盖 [-0.5, width - 0.5)
+        if (u >= -0.5 && u < camera.width - 0.5 && v >= -0.5 && v < camera.height - 0.5)
+            inside[end] += area;
+    }
+    if (total[0] <= 0. || total[1] <= 0.)
+        return 0.;
+    return std::min(inside[0] / total[0], inside[1] / total[1]);
 }
 
 } // namespace rmcs_energy_trace::registration

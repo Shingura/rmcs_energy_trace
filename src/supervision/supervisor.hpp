@@ -22,6 +22,10 @@ public:
         double max_free_space_ratio = 0.15;
         // 未被遮挡的有效像素少于该值时，这一帧无法判断（例如几乎全被挡住，或离开视野）
         std::size_t min_unoccluded_pixels = 200;
+        // mesh 两端中较小的画面内面积比例低于该值时，这一帧无法判断。
+        // 轴向位置只能靠两端约束，一端出了画面，跟踪器会沿轴线滑动；
+        // 深度检查只统计画面内的像素，看不出来，遮挡检查有意不看支持率，也拦不住
+        double min_end_in_image_ratio = 0.8;
         // 相邻两帧的位姿跳变上限，沿用 Benmao 的 8 cm、30°。只看中心和长轴，绕长轴的转角没有意义
         double max_jump_translation = 0.08;
         double max_jump_axis_deg = 30.;
@@ -43,6 +47,8 @@ public:
         registration::DepthCheck::Quality depth;
         // 这一帧运行了检测时，mesh 投影框与检测框的 IoU
         std::optional<double> detection_iou;
+        // pose 处 mesh 两端中较小的画面内面积比例 (DepthCheck::end_in_image_ratio)，不给则不检查
+        std::optional<double> end_in_image_ratio;
     };
 
     struct Decision {

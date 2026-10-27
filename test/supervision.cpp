@@ -1,5 +1,6 @@
 #include <numbers>
 #include <optional>
+#include <string_view>
 
 #include <eigen3/Eigen/Geometry>
 #include <gtest/gtest.h>
@@ -34,17 +35,36 @@ auto make_depth(double support, double free_space, double occluded) -> DepthChec
 }
 
 auto good(double x = 0.) -> Supervisor::Observation {
-    return {.pose = make_pose(x), .depth = make_depth(0.95, 0.02, 0.03), .detection_iou = {}};
+    return {
+        .pose = make_pose(x),
+        .depth = make_depth(0.95, 0.02, 0.03),
+        .detection_iou = {},
+        .end_in_image_ratio = {}};
 }
 
 // mesh 有一半落在背景上
 auto over_background() -> Supervisor::Observation {
-    return {.pose = make_pose(0.), .depth = make_depth(0.5, 0.5, 0.), .detection_iou = {}};
+    return {
+        .pose = make_pose(0.),
+        .depth = make_depth(0.5, 0.5, 0.),
+        .detection_iou = {},
+        .end_in_image_ratio = {}};
 }
 
 // 几乎全被挡住：未被遮挡的像素只有 50 个
 auto occluded() -> Supervisor::Observation {
-    return {.pose = make_pose(0.), .depth = make_depth(0.04, 0.01, 0.95), .detection_iou = {}};
+    return {
+        .pose = make_pose(0.),
+        .depth = make_depth(0.04, 0.01, 0.95),
+        .detection_iou = {},
+        .end_in_image_ratio = {}};
+}
+
+// 有一端在画面外：深度检查本身看起来很好
+auto end_outside(double ratio = 0.5) -> Supervisor::Observation {
+    auto observation = good();
+    observation.end_in_image_ratio = ratio;
+    return observation;
 }
 
 auto started() -> Supervisor {
@@ -176,4 +196,43 @@ TEST(Supervisor, TrackerFailureIsBad) {
     const auto decision = supervisor.update(observation);
     EXPECT_EQ(decision.health, Health::kBad);
     EXPECT_FALSE(decision.trusted);
+}
+
+// 有一端在画面外时无法判断：即使深度检查很好也不可信，也不计入不健康
+TEST(Supervisor, EndOutsideImageIsUnknown) {
+    auto supervisor = started();
+    for (int i = 0; i < 10; i++) {
+        const auto decision = supervisor.update(end_outside());
+        EXPECT_EQ(decision.health, Health::kUnknown);
+        EXPECT_FALSE(decision.trusted);
+        EXPECT_FALSE(decision.reinitialize);
+        EXPECT_NE(decision.reason.find("outside"), std::string_view::npos);
+    }
+    EXPECT_TRUE(supervisor.update(good()).trusted);
+}
+
+TEST(Supervisor, EndOutsideImageCountsAsNoGoodFrame) {
+    auto supervisor = Supervisor{Supervisor::Config{.no_good_frames = 3}};
+    supervisor.start(make_pose(0.));
+    EXPECT_FALSE(supervisor.update(end_outside()).reinitialize);
+    EXPECT_FALSE(supervisor.update(end_outside()).reinitialize);
+    EXPECT_TRUE(supervisor.update(end_outside()).reinitialize);
+}
+
+// 两端画面内比例正常时不影响原有判断；不给比例时不检查
+TEST(Supervisor, EndInImageRatioDoesNotAffectOtherRules) {
+    auto supervisor = started();
+    auto observation = good();
+    observation.end_in_image_ratio = 0.9;
+    EXPECT_EQ(supervisor.update(observation).health, Health::kGood);
+    observation.end_in_image_ratio = 0.8;
+    EXPECT_EQ(supervisor.update(observation).health, Health::kGood);
+    observation.depth = make_depth(0.5, 0.5, 0.);
+    EXPECT_EQ(supervisor.update(observation).health, Health::kBad);
+    observation.depth = make_depth(0.04, 0.01, 0.95);
+    EXPECT_EQ(supervisor.update(observation).health, Health::kUnknown);
+    // 位姿跳变在画面内比例之前判断
+    observation = end_outside();
+    observation.pose = make_pose(0.10);
+    EXPECT_EQ(supervisor.update(observation).health, Health::kBad);
 }

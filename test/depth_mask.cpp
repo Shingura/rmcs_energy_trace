@@ -1,16 +1,21 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <numbers>
 
 #include <gtest/gtest.h>
 #include <opencv2/core.hpp>
 
 #include "geometry/camera.hpp"
 #include "geometry/depth_cloud.hpp"
+#include "geometry/mesh.hpp"
+#include "registration/depth_check.hpp"
 #include "registration/registration.hpp"
 
 using rmcs_energy_trace::geometry::Camera;
 using rmcs_energy_trace::geometry::depth_to_cloud;
+using rmcs_energy_trace::geometry::Mesh;
+using rmcs_energy_trace::registration::DepthCheck;
 using rmcs_energy_trace::registration::Registration;
 
 namespace {
@@ -89,4 +94,52 @@ TEST(DepthMask, MismatchedMaskGivesEmptyCloud) {
     EXPECT_TRUE(depth_to_cloud(depth, kCamera, kRoi, wrong_size)->empty());
     const auto wrong_type = cv::Mat(kHeight, kWidth, CV_8UC3, cv::Scalar::all(255));
     EXPECT_TRUE(depth_to_cloud(depth, kCamera, kRoi, wrong_type)->empty());
+}
+
+namespace {
+
+// 长轴沿 z 的小 mesh：z = -0.1 处一个三角形（负端），z = 0 处一个（中段），
+// z = 0.09 和 0.11 处各一个（正端）。四个三角形面积相同
+auto make_mesh() -> Mesh {
+    const auto triangle = [](float z) {
+        constexpr auto s = 0.01f;
+        return Mesh::Triangle{
+            Eigen::Vector3f{0.f, -s, z - s}, Eigen::Vector3f{0.f, s, z - s},
+            Eigen::Vector3f{0.f, 0.f, z + 2.f * s}};
+    };
+    return {{triangle(-0.1f), triangle(0.f), triangle(0.09f), triangle(0.11f)}};
+}
+
+// mesh 的 z 轴转到相机的 x 方向，沿 x 平移 tx，距相机 tz
+auto make_pose(double tx, double tz) -> Eigen::Isometry3d {
+    auto pose = Eigen::Isometry3d::Identity();
+    pose.linear() =
+        Eigen::AngleAxisd{std::numbers::pi / 2., Eigen::Vector3d::UnitY()}.toRotationMatrix();
+    pose.translation() = Eigen::Vector3d{tx, 0., tz};
+    return pose;
+}
+
+} // namespace
+
+// 相机 fx = 60、cx = 32，z = 1 m 处 u = 60 * x + 32，图像宽 64，x 在 [-0.533, 0.525) 内
+TEST(DepthCheck, EndInImageRatioFullyInside) {
+    const auto check = DepthCheck{make_mesh(), {}};
+    EXPECT_DOUBLE_EQ(check.end_in_image_ratio(kCamera, make_pose(0., 1.)), 1.);
+}
+
+// 平移 0.45 m 后正端的重心在 0.54、0.56，都在画面外；中段和负端在画面内
+TEST(DepthCheck, EndInImageRatioOneEndOutside) {
+    const auto check = DepthCheck{make_mesh(), {}};
+    EXPECT_DOUBLE_EQ(check.end_in_image_ratio(kCamera, make_pose(0.45, 1.)), 0.);
+}
+
+// 平移 0.43 m：正端的重心在 0.52（画面内）和 0.54（画面外）
+TEST(DepthCheck, EndInImageRatioOneEndHalfOutside) {
+    const auto check = DepthCheck{make_mesh(), {}};
+    EXPECT_NEAR(check.end_in_image_ratio(kCamera, make_pose(0.43, 1.)), 0.5, 1e-6);
+}
+
+TEST(DepthCheck, EndInImageRatioBehindCamera) {
+    const auto check = DepthCheck{make_mesh(), {}};
+    EXPECT_DOUBLE_EQ(check.end_in_image_ratio(kCamera, make_pose(0., -1.)), 0.);
 }
