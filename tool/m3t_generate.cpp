@@ -19,8 +19,8 @@
 #ifndef RMCS_ENERGY_UNIT_MESH
 # error "RMCS_ENERGY_UNIT_MESH must be defined"
 #endif
-#ifndef RMCS_ENERGY_TRACE_DEFAULT_MODEL_DIR
-# error "RMCS_ENERGY_TRACE_DEFAULT_MODEL_DIR must be defined"
+#ifndef RMCS_ENERGY_TRACE_ASSET_DIR
+# error "RMCS_ENERGY_TRACE_ASSET_DIR must be defined"
 #endif
 
 namespace fs = std::filesystem;
@@ -33,7 +33,7 @@ void print_usage() {
         "Usage: m3t_generate [--mesh <energy_unit.stl>] [--out <dir>] [--sphere-radius 0.8]\n"
         "                    [--n-divides 4] [--n-points 200] [--image-size 2000]\n"
         "Default mesh: {}\nDefault out: {}",
-        RMCS_ENERGY_UNIT_MESH, RMCS_ENERGY_TRACE_DEFAULT_MODEL_DIR);
+        RMCS_ENERGY_UNIT_MESH, RMCS_ENERGY_TRACE_ASSET_DIR);
 }
 
 auto seconds_since(std::chrono::steady_clock::time_point begin) -> double {
@@ -44,7 +44,7 @@ auto seconds_since(std::chrono::steady_clock::time_point begin) -> double {
 
 auto main(int argc, char* argv[]) -> int {
     auto mesh_path = std::string{RMCS_ENERGY_UNIT_MESH};
-    auto out_dir = fs::path{RMCS_ENERGY_TRACE_DEFAULT_MODEL_DIR};
+    auto out_dir = fs::path{RMCS_ENERGY_TRACE_ASSET_DIR};
     auto params = tracking::ModelParams{};
 
     for (int i = 1; i < argc; i++) {

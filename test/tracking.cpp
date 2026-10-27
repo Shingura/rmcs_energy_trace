@@ -22,8 +22,8 @@
 #include "synthetic/depth_renderer.hpp"
 #include "tracking/tracker.hpp"
 
-#if !defined(RMCS_ENERGY_UNIT_MESH) || !defined(RMCS_ENERGY_TRACE_MODEL_DIR)
-# error "RMCS_ENERGY_UNIT_MESH and RMCS_ENERGY_TRACE_MODEL_DIR must be defined"
+#if !defined(RMCS_ENERGY_UNIT_MESH) || !defined(RMCS_ENERGY_TRACE_ASSET_DIR)
+# error "RMCS_ENERGY_UNIT_MESH and RMCS_ENERGY_TRACE_ASSET_DIR must be defined"
 #endif
 
 using rmcs_energy_trace::geometry::Camera;
@@ -136,7 +136,7 @@ protected:
 
     static auto models_available() -> bool {
         using namespace rmcs_energy_trace::tracking;
-        const auto dir = std::filesystem::path{RMCS_ENERGY_TRACE_MODEL_DIR};
+        const auto dir = std::filesystem::path{RMCS_ENERGY_TRACE_ASSET_DIR};
         return std::filesystem::exists(dir / kMeshFile)
             && std::filesystem::exists(dir / kRegionModelFile)
             && std::filesystem::exists(dir / kDepthModelFile);
@@ -250,7 +250,7 @@ protected:
 
     static auto make_config(bool use_region, bool use_depth) -> Tracker::Config {
         auto config = Tracker::Config{};
-        config.model_dir = RMCS_ENERGY_TRACE_MODEL_DIR;
+        config.model_dir = RMCS_ENERGY_TRACE_ASSET_DIR;
         config.camera = kCamera;
         config.use_region = use_region;
         config.use_depth = use_depth;
@@ -396,26 +396,23 @@ protected:
 
 TEST_F(TrackingTest, UprightOnGroundPlane) {
     if (!models_available())
-        GTEST_SKIP() << "M3T model files not found in " << RMCS_ENERGY_TRACE_MODEL_DIR
-                     << ". Build with -DRMCS_ENERGY_TRACE_BUILD_M3T_TOOLS=ON and run m3t_generate "
-                        "(see README).";
+        GTEST_SKIP() << "M3T model files not found in " << RMCS_ENERGY_TRACE_ASSET_DIR
+                     << ". Run scripts/download_assets.sh.";
     run_case("upright", make_upright_sequence());
 }
 
 TEST_F(TrackingTest, FreeFloating) {
     if (!models_available())
-        GTEST_SKIP() << "M3T model files not found in " << RMCS_ENERGY_TRACE_MODEL_DIR
-                     << ". Build with -DRMCS_ENERGY_TRACE_BUILD_M3T_TOOLS=ON and run m3t_generate "
-                        "(see README).";
+        GTEST_SKIP() << "M3T model files not found in " << RMCS_ENERGY_TRACE_ASSET_DIR
+                     << ". Run scripts/download_assets.sh.";
     run_case("floating", make_floating_sequence());
 }
 
 // 能量单元在第 kVanishAt 帧离开画面，跟踪器还停在原处：监督要在几帧之内要求重新初始化
 TEST_F(TrackingTest, SupervisorDetectsLoss) {
     if (!models_available())
-        GTEST_SKIP() << "M3T model files not found in " << RMCS_ENERGY_TRACE_MODEL_DIR
-                     << ". Build with -DRMCS_ENERGY_TRACE_BUILD_M3T_TOOLS=ON and run m3t_generate "
-                        "(see README).";
+        GTEST_SKIP() << "M3T model files not found in " << RMCS_ENERGY_TRACE_ASSET_DIR
+                     << ". Run scripts/download_assets.sh.";
     const auto lost_frames = static_cast<std::size_t>(Supervisor::Config{}.bad_frames);
     for (const auto& [name, sequence] :
          {std::pair{"upright vanish", make_upright_sequence(kVanishAt)},

@@ -76,13 +76,15 @@ rmcs_energy_trace/
 │       ├── grasp_candidates.hpp   根据能量单元的中心和长轴生成抓取候选
 │       └── joint_state_player.hpp 发布 /joint_states，按时间插值回放轨迹
 │
-├── third_party/m3t/               随仓库带入的 M3T 源码（MIT），未修改上游文件
-│   ├── README.md                  来源、提交号、删减内容和本地处理方式
+├── third_party/m3t/               随仓库带入的 M3T 源码（MIT），上游文件只改了模型加载中的一处
+│   ├── README.md                  来源、提交号、删减内容和本地修改
 │   ├── include/m3t/               M3T 源码
 │   ├── third_party/               M3T 自带的第三方头文件
 │   └── stubs/                     占位文件：去掉 OpenGL、GLFW、highgui 依赖，以及供 clangd 使用的空 omp.h
 │
 ├── scripts/
+│   ├── download_assets.sh         下载运行所需的网络和 M3T 模型到 assets/，并校验 SHA256
+│   ├── assets.sha256              要下载的文件清单和校验值
 │   └── export_yolo.py             把 Ultralytics 的 .pt 权重导出为 OpenVINO 格式
 │
 ├── config/
@@ -92,20 +94,40 @@ rmcs_energy_trace/
 ├── launch/grasp_sim.launch.py     启动抓取仿真（MoveIt、仿真节点、RViz）
 ├── rviz/grasp_sim.rviz            抓取仿真的 RViz 配置
 ├── meshes/energy_unit.stl         能量单元的 mesh
-├── dataset/                       本地数据，不进入仓库（见下文）
+├── assets/                        运行所需的网络和 M3T 模型，由 download_assets.sh 下载，不进入仓库
+├── dataset/                       开发用的本地数据，不进入仓库（见下文）
 ├── CMakeLists.txt、package.xml、plugins.xml   
 ├── .clangd                        
 ├── .clang-format、.clang-tidy     
 └── AGENTS.md                      
 ```
 
-`dataset/` 不进入仓库，需要自己准备：
+## 运行所需的文件
+
+网络和 M3T 模型太大，不放进仓库。编译前在包目录下运行：
+
+```zsh
+scripts/download_assets.sh
+```
+
+脚本按 `scripts/assets.sha256` 把下面的文件下载到 `assets/`，并逐个校验 SHA256。已存在且校验通过的文件会跳过，所以可以重复运行；有文件下载失败或校验不通过时退出码为 1。`--dir` 指定其他目录，`--base-url` 指定其他下载地址。
+
+| 文件 | 大小 | 用途 | 来源 |
+|---|---|---|---|
+| `yolo11n_tars.xml`、`yolo11n_tars.bin` | 约 10 MB | YOLO 检测网络（OpenVINO） | TARS 开源的权重，用 `scripts/export_yolo.py` 导出 |
+| `energy_unit.obj` | 约 106 KB | M3T 使用的 mesh | `m3t_generate` 生成 |
+| `energy_unit_region_model.bin`、`energy_unit_depth_model.bin` | 约 74 MB、70 MB | M3T 的区域模型和深度模型 | `m3t_generate` 生成，需要 OpenGL 和显示器 |
+
+文件放在 GitHub Release `assets-v1`。编译时 `assets/` 会安装到包的 share 目录，随安装目录一起同步到机器人；目录不存在时跳过，不影响编译。M3T 加载模型时只比较 OBJ 的文件名，所以 `assets/` 放在哪里都能用（见 `third_party/m3t/README.md`）。
+
+更新某个文件后，把新文件上传到 Release，再在 `assets/` 下运行 `sha256sum <文件名>`，用结果替换 `scripts/assets.sha256` 中对应的一行。
+
+`dataset/` 存放开发用的数据，也不进入仓库：
 
 ```text
 dataset/
 ├── images/                        测试图片
-├── networks/                      YOLO 权重和导出的 OpenVINO 网络
-└── m3t/                           m3t_generate 生成的 M3T 模型文件（约 150 MB）
+└── networks/                      原始权重：YOLO 的 .pt
 ```
 
 ## 配准
@@ -176,7 +198,7 @@ ros2 run rmcs_energy_trace mask_ablation [--trials 40] [--seed 2025] [--mesh <en
 
 `tracking::Tracker` 用 [M3T](https://github.com/DLR-RM/3DObjectTracking) 跟踪位姿。它从上一帧的位姿出发，同时用彩色图的区域线索和深度图的深度线索，每帧约 0.6 ms（单线程，Ryzen 9600X）。只用深度线索约 0.15 ms。
 
-M3T 需要三个预先生成的文件：`energy_unit.obj`、区域模型和深度模型，放在 `dataset/m3t/`。生成时要渲染，需要 OpenGL 和一个显示，所以生成工具默认不构建：
+M3T 需要三个预先生成的文件：`energy_unit.obj`、区域模型和深度模型，由 `scripts/download_assets.sh` 下载到 `assets/`。只有改了 mesh 或生成参数时才需要重新生成。生成时要渲染，需要 OpenGL 和一个显示，所以生成工具默认不构建，默认输出到 `assets/`：
 
 ```zsh
 colcon build --packages-select rmcs_energy_trace --cmake-args -DRMCS_ENERGY_TRACE_BUILD_M3T_TOOLS=ON
@@ -185,7 +207,7 @@ env -u WAYLAND_DISPLAY DISPLAY=:0 /workspaces/RMCS/rmcs_ws/build/rmcs_energy_tra
 
 默认参数下约 20 s，两个模型文件共约 150 MB。参数见 `m3t_generate --help` 的用法提示：`--mesh`、`--out`、`--sphere-radius`、`--n-divides`、`--n-points`、`--image-size`。运行时 `Tracker::Config::model_params` 必须与生成时一致。
 
-文件里记录了 OBJ 的路径，移动目录后要重新生成。
+重新生成后，上传新文件并更新 `scripts/assets.sha256`（见“运行所需的文件”）。
 
 运行时不需要 OpenGL。库里的 M3T（`m3t_runtime`）用占位头文件编译渲染器，不链接 libGL、GLEW、GLFW，也不会初始化 GL，没有显示的环境也能运行。M3T 的源码在 `third_party/m3t/`，删减内容和本地修改见其中的 `README.md`。
 

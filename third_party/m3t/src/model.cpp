@@ -274,8 +274,11 @@ bool Model::LoadBodyData(const std::shared_ptr<Body> &body_ptr,
             sizeof(geometry_enable_culling));
   ifs->read((char *)(&maximum_body_diameter), sizeof(maximum_body_diameter));
   ifs->read((char *)(geometry2body_pose.data()), sizeof(geometry2body_pose));
-  return Equivalent(std::filesystem::path{geometry_path_string},
-                    body_ptr->geometry_path()) &&
+  // rmcs_energy_trace 修改：上游比较 OBJ 的完整路径（Equivalent），模型目录换了位置
+  // （例如部署到机器人）就无法加载，而无显示器的环境又不能重新生成。这里只比较文件名；
+  // 文件内容由 scripts/download_assets.sh 的 SHA256 校验保证，其余几何参数照常比较
+  return std::filesystem::path{geometry_path_string}.filename() ==
+             body_ptr->geometry_path().filename() &&
          geometry_unit_in_meter == body_ptr->geometry_unit_in_meter() &&
          geometry_counterclockwise == body_ptr->geometry_counterclockwise() &&
          geometry_enable_culling == body_ptr->geometry_enable_culling() &&

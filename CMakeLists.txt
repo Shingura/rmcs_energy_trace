@@ -143,7 +143,7 @@ if(RMCS_ENERGY_TRACE_BUILD_M3T_TOOLS)
   target_link_libraries(m3t_generate PRIVATE m3t_full ${PCL_LIBRARIES})
   target_compile_definitions(m3t_generate PRIVATE
     RMCS_ENERGY_UNIT_MESH="${PROJECT_SOURCE_DIR}/meshes/energy_unit.stl"
-    RMCS_ENERGY_TRACE_DEFAULT_MODEL_DIR="${PROJECT_SOURCE_DIR}/dataset/m3t"
+    RMCS_ENERGY_TRACE_ASSET_DIR="${PROJECT_SOURCE_DIR}/assets"
   )
   install(TARGETS m3t_generate DESTINATION lib/${PROJECT_NAME})
 endif()
@@ -151,6 +151,8 @@ endif()
 pluginlib_export_plugin_description_file(rmcs_executor plugins.xml)
 
 install(DIRECTORY config meshes launch rviz DESTINATION share/${PROJECT_NAME})
+# assets/ 由 scripts/download_assets.sh 下载，不在仓库中；还没下载时跳过
+install(DIRECTORY assets DESTINATION share/${PROJECT_NAME} OPTIONAL)
 
 # 可选：抓取运动学仿真（需要 MoveIt，缺失时跳过，不影响其余目标）
 find_package(moveit_ros_planning_interface QUIET)
@@ -204,7 +206,7 @@ if(BUILD_TESTING)
   target_link_libraries(test_tracking ${PROJECT_NAME})
   target_compile_definitions(test_tracking PRIVATE
     RMCS_ENERGY_UNIT_MESH="${PROJECT_SOURCE_DIR}/meshes/energy_unit.stl"
-    RMCS_ENERGY_TRACE_MODEL_DIR="${PROJECT_SOURCE_DIR}/dataset/m3t"
+    RMCS_ENERGY_TRACE_ASSET_DIR="${PROJECT_SOURCE_DIR}/assets"
   )
   set_tests_properties(test_tracking PROPERTIES TIMEOUT 300)
 

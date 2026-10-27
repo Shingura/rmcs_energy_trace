@@ -26,11 +26,13 @@ DLR 的 M3T（Multi-Body Multi-Modality Multi-Camera 3D Tracker），用于能�
 
 ## 本地修改
 
-M3T 的源文件没有改动。运行时库的处理如下。
+源文件只改了一处：`src/model.cpp` 的 `Model::LoadBodyData`。上游检查模型文件里记录的 OBJ 路径与当前 OBJ 是否为同一个文件（`Equivalent`），模型目录换了位置（例如部署到机器人）就无法加载；而重新生成需要 OpenGL 和显示器，机器人上做不到。现在只比较文件名，其余几何参数（单位、绕序、裁剪、最大直径、几何到物体的位姿）照常比较。文件内容是否一致，由 `scripts/download_assets.sh` 对每个文件的 SHA256 校验保证。
+
+运行时库的处理如下。
 
 - `stubs/gl/`：`GL/glew.h` 和 `GLFW/glfw3.h` 的占位版本。运行时库（`m3t_runtime`）用它们编译渲染器源文件，所有 GL 函数是空实现，`glfwInit()` 返回失败并打印错误。因此运行时不链接 OpenGL、GLEW、GLFW 和 X11，也不能渲染。生成区域和深度模型要用 `m3t_full`（见 `tool/m3t_generate.cpp`）。
 - `stubs/highgui_stubs.cpp`：`cv::imshow` 和 `cv::waitKey` 的空实现。M3T 的调试可视化会引用它们，我们不链接 OpenCV highgui（它依赖 GTK 和 X11）。
 
 ## 已知限制
 
-区域和深度模型文件里记录了 `energy_unit.obj` 的路径，M3T 加载时用 `std::filesystem::equivalent` 比较。把模型目录移到别处后，需要重新运行 `m3t_generate`。
+区域和深度模型文件里仍记录着生成时 `energy_unit.obj` 的路径，但加载时只比较文件名（见上一节），模型目录可以移动。改了 mesh 或生成参数后，需要重新运行 `m3t_generate`，并更新 `scripts/assets.sha256` 中的校验值。
