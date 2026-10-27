@@ -56,6 +56,9 @@ public:
         registration::DepthCheck::Config depth_check;
         tracking::Tracker::Config tracker;
         supervision::Supervisor::Config supervisor;
+        // 判定“跟踪稳定”所需的连续可信帧数（处理帧，不含 sequence_replay 跳过的帧）。
+        // 默认 15 帧，30 fps 下 0.5 s；最终取值待实机数据确定
+        int stable_frames = 15;
     };
 
     // 各阶段耗时（毫秒）。没有运行的阶段为 0
@@ -92,6 +95,11 @@ public:
         // 位姿是否可以交给机械臂。配准通过的那一帧可信（配准自带深度检查）；
         // 跟踪状态下由监督决定，要求重新初始化的帧不可信
         bool trusted = false;
+        // 跟踪稳定：处于跟踪状态，且包括这一帧在内已经连续 Config::stable_frames 个处理帧可信。
+        // 配准通过的那一帧算第 1 个可信帧；不可信的帧和重新初始化都把计数清零。
+        // 机械臂控制在 stable 为 true 后才开始运动，此前原地不动，等视觉初始化并稳定；
+        // 运动中监督要求重新初始化（stable 变为 false）时应停下，原地重新初始化
+        bool stable = false;
         Diagnostics diagnostics;
     };
 

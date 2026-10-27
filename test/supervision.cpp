@@ -5,9 +5,12 @@
 #include <eigen3/Eigen/Geometry>
 #include <gtest/gtest.h>
 
+#include "pipeline/reference_monitor.hpp"
 #include "registration/depth_check.hpp"
 #include "supervision/supervisor.hpp"
 
+using rmcs_energy_trace::pipeline::Pipeline;
+using rmcs_energy_trace::pipeline::ReferenceMonitor;
 using rmcs_energy_trace::registration::DepthCheck;
 using rmcs_energy_trace::supervision::Supervisor;
 
@@ -94,6 +97,22 @@ TEST(Supervisor, HealthyFramesAreTrusted) {
 }
 
 // 遮挡不算失败：不可信，但不计入连续失败
+// 大部分被挡住、但未被遮挡的像素数仍够多（高分辨率相机）：按比例判为无法判断，即使剩下的像素看起来健康
+TEST(Supervisor, MostlyOccludedIsUnknown) {
+    auto supervisor = started();
+    auto observation = good();
+    observation.depth = make_depth(0.2, 0., 0.8);
+    observation.depth.valid_pixels = 20000; // 未被遮挡 4000 个，远多于像素数下限
+    const auto decision = supervisor.update(observation);
+    EXPECT_EQ(decision.health, Health::kUnknown);
+    EXPECT_FALSE(decision.trusted);
+
+    // 比例刚好不低于下限：照常判断
+    observation.depth = make_depth(0.25, 0., 0.75);
+    observation.depth.valid_pixels = 20000;
+    EXPECT_EQ(supervisor.update(observation).health, Health::kGood);
+}
+
 TEST(Supervisor, OcclusionIsNotFailure) {
     auto supervisor = started();
     for (int i = 0; i < 10; i++) {
@@ -235,4 +254,304 @@ TEST(Supervisor, EndInImageRatioDoesNotAffectOtherRules) {
     observation = end_outside();
     observation.pose = make_pose(0.10);
     EXPECT_EQ(supervisor.update(observation).health, Health::kBad);
+}
+
+namespace {
+
+using Monitor = ReferenceMonitor;
+
+// 底座系下的目标位姿：中心在 (x, 0, 0.6)，长轴绕 y 轴偏离 z 轴 tilt_deg
+auto make_base_pose(double x, double tilt_deg = 0.) -> Eigen::Isometry3d {
+    auto pose = Eigen::Isometry3d::Identity();
+    pose.linear() = Eigen::AngleAxisd{tilt_deg * std::numbers::pi / 180., Eigen::Vector3d::UnitY()}
+                        .toRotationMatrix();
+    pose.translation() = Eigen::Vector3d{x, 0., 0.6};
+    return pose;
+}
+
+// 相机在底座系下的位姿：位置 (0.1, -0.5, 0.3)，朝向任意，再绕 z 轴转 yaw_deg
+auto make_camera(double yaw_deg = 0.) -> Eigen::Isometry3d {
+    auto camera = Eigen::Isometry3d::Identity();
+    camera.linear() =
+        (Eigen::AngleAxisd{yaw_deg * std::numbers::pi / 180., Eigen::Vector3d::UnitZ()}
+         * Eigen::AngleAxisd{0.7, Eigen::Vector3d{1., 2., 3.}.normalized()})
+            .toRotationMatrix();
+    camera.translation() =
+        Eigen::Vector3d{0.1, -0.5, 0.3} + Eigen::Vector3d{yaw_deg, 0., 0.} * 1e-2;
+    return camera;
+}
+
+// 一帧流程输出：base_pose 为底座系下的目标位姿，按相机位姿换到相机系
+auto make_result(
+    const Eigen::Isometry3d& base_pose, const Eigen::Isometry3d& camera, bool trusted, bool stable)
+    -> Pipeline::Result {
+    auto result = Pipeline::Result{};
+    result.state = Pipeline::State::kTracking;
+    result.pose = camera.inverse() * base_pose;
+    result.trusted = trusted;
+    result.stable = stable;
+    return result;
+}
+
+auto established() -> Monitor {
+    auto monitor = Monitor{};
+    monitor.update(make_result(make_base_pose(0.), make_camera(), true, true), make_camera());
+    return monitor;
+}
+
+// 用默认相机喂一帧
+auto feed(
+    Monitor& monitor, const Eigen::Isometry3d& base_pose, bool trusted = true, bool grasped = false)
+    -> Monitor::Output {
+    return monitor.update(
+        make_result(base_pose, make_camera(), trusted, true), make_camera(), grasped);
+}
+
+} // namespace
+
+// 第一次 stable 时建立参考，参考是底座系下的位姿
+TEST(ReferenceMonitor, EstablishesReferenceOnStable) {
+    auto monitor = Monitor{};
+    const auto camera = make_camera();
+    // 可信但还不稳定：不建立参考
+    auto output = monitor.update(make_result(make_base_pose(0.), camera, true, false), camera);
+    EXPECT_EQ(output.state, Monitor::State::kNoReference);
+    EXPECT_FALSE(output.reference.has_value());
+    EXPECT_FALSE(output.displacement.has_value());
+
+    output = monitor.update(make_result(make_base_pose(0.), camera, true, true), camera);
+    EXPECT_EQ(output.state, Monitor::State::kEstablished);
+    ASSERT_TRUE(output.reference.has_value());
+    EXPECT_TRUE(output.reference->isApprox(make_base_pose(0.), 1e-9));
+    EXPECT_FALSE(output.comparison.has_value());
+    EXPECT_EQ(output.inconsistent_count, 0);
+    ASSERT_TRUE(output.displacement.has_value());
+    EXPECT_NEAR(output.displacement->total, 0., 1e-12);
+    EXPECT_EQ(monitor.state(), Monitor::State::kEstablished);
+}
+
+// stable 但不可信的帧（不会出现在流程里，但监视器不应据此建立参考）
+TEST(ReferenceMonitor, UntrustedFrameDoesNotEstablishReference) {
+    auto monitor = Monitor{};
+    const auto camera = make_camera();
+    const auto output =
+        monitor.update(make_result(make_base_pose(0.), camera, false, true), camera);
+    EXPECT_EQ(output.state, Monitor::State::kNoReference);
+    EXPECT_EQ(monitor.state(), Monitor::State::kNoReference);
+}
+
+// 一致的帧：给出比较结果，计数为 0；阈值是闭区间
+TEST(ReferenceMonitor, ConsistentFrame) {
+    auto monitor = established();
+    auto output = feed(monitor, make_base_pose(0.004, 2.));
+    EXPECT_EQ(output.state, Monitor::State::kEstablished);
+    ASSERT_TRUE(output.comparison.has_value());
+    EXPECT_TRUE(output.comparison->consistent);
+    EXPECT_NEAR(output.comparison->center_distance, 0.004, 1e-9);
+    EXPECT_NEAR(output.comparison->axis_deg, 2., 1e-9);
+    EXPECT_EQ(output.inconsistent_count, 0);
+    ASSERT_TRUE(output.displacement.has_value());
+    EXPECT_NEAR(output.displacement->total, 0.004, 1e-9);
+
+    // 刚好在阈值内
+    output = feed(monitor, make_base_pose(0.0049, 5.9));
+    EXPECT_TRUE(output.comparison->consistent);
+}
+
+// 中心差或轴线夹角任一超限即不一致
+TEST(ReferenceMonitor, InconsistentByCenterOrAxis) {
+    auto monitor = established();
+    auto output = feed(monitor, make_base_pose(0.006));
+    ASSERT_TRUE(output.comparison.has_value());
+    EXPECT_FALSE(output.comparison->consistent);
+    EXPECT_EQ(output.inconsistent_count, 1);
+
+    output = feed(monitor, make_base_pose(0., 6.5));
+    EXPECT_FALSE(output.comparison->consistent);
+    EXPECT_NEAR(output.comparison->axis_deg, 6.5, 1e-9);
+    EXPECT_EQ(output.inconsistent_count, 2);
+    EXPECT_EQ(output.state, Monitor::State::kEstablished);
+}
+
+// 不可信的帧不参与比较，不计入也不清零计数，即使位姿差得很远
+TEST(ReferenceMonitor, UntrustedFramesDoNotAffectCount) {
+    auto monitor = established();
+    EXPECT_EQ(feed(monitor, make_base_pose(0.05)).inconsistent_count, 1);
+    EXPECT_EQ(feed(monitor, make_base_pose(0.05)).inconsistent_count, 2);
+    for (int i = 0; i < 20; i++) {
+        // 不可信的帧：位姿远离参考，或恰好与参考一致，都不改变计数
+        const auto output = feed(monitor, make_base_pose(i % 2 == 0 ? 0.3 : 0.), false);
+        EXPECT_EQ(output.state, Monitor::State::kEstablished);
+        EXPECT_FALSE(output.comparison.has_value());
+        EXPECT_FALSE(output.displacement.has_value());
+        EXPECT_EQ(output.inconsistent_count, 2);
+        EXPECT_TRUE(output.reference.has_value());
+    }
+    // 不可信的帧不拆开“连续”：再来 3 个不一致的可信帧就判为被移动
+    EXPECT_EQ(feed(monitor, make_base_pose(0.05)).inconsistent_count, 3);
+    EXPECT_EQ(feed(monitor, make_base_pose(0.05)).inconsistent_count, 4);
+    EXPECT_EQ(feed(monitor, make_base_pose(0.05)).state, Monitor::State::kMoved);
+}
+
+// 连续 5 个可信帧不一致：判为被移动，参考被清除
+TEST(ReferenceMonitor, MovedAfterConsecutiveInconsistentFrames) {
+    auto monitor = established();
+    for (int i = 1; i < 5; i++) {
+        const auto output = feed(monitor, make_base_pose(0.02));
+        EXPECT_EQ(output.state, Monitor::State::kEstablished);
+        EXPECT_EQ(output.inconsistent_count, i);
+    }
+    const auto output = feed(monitor, make_base_pose(0.02));
+    EXPECT_EQ(output.state, Monitor::State::kMoved);
+    EXPECT_EQ(output.inconsistent_count, 5);
+    EXPECT_FALSE(output.reference.has_value());
+    ASSERT_TRUE(output.comparison.has_value());
+    EXPECT_FALSE(output.comparison->consistent);
+    EXPECT_EQ(monitor.state(), Monitor::State::kMoved);
+}
+
+// kMoved 保持到 reset()：期间不建立参考、不比较，输出仍是判为被移动的那次比较和计数
+TEST(ReferenceMonitor, MovedIsHeldUntilReset) {
+    auto monitor = established();
+    for (int i = 0; i < 5; i++)
+        feed(monitor, make_base_pose(0.02));
+    ASSERT_EQ(monitor.state(), Monitor::State::kMoved);
+
+    // 可信、稳定、与旧参考一致或不一致的帧都一样；不可信的帧和已夹住也一样
+    for (const auto x : {0.02, 0., 0.5}) {
+        for (const auto trusted : {true, false}) {
+            for (const auto grasped : {false, true}) {
+                const auto output = feed(monitor, make_base_pose(x), trusted, grasped);
+                EXPECT_EQ(output.state, Monitor::State::kMoved);
+                EXPECT_FALSE(output.reference.has_value());
+                EXPECT_FALSE(output.displacement.has_value());
+                EXPECT_EQ(output.inconsistent_count, 5);
+                ASSERT_TRUE(output.comparison.has_value());
+                EXPECT_FALSE(output.comparison->consistent);
+                EXPECT_NEAR(output.comparison->center_distance, 0.02, 1e-9);
+            }
+        }
+    }
+    EXPECT_EQ(monitor.state(), Monitor::State::kMoved);
+}
+
+// reset() 后回到无参考；可信但不稳定的帧不建立参考，下一个 trusted 且 stable 的帧以新位置建立
+TEST(ReferenceMonitor, ReestablishesAfterReset) {
+    auto monitor = established();
+    for (int i = 0; i < 5; i++)
+        feed(monitor, make_base_pose(0.02));
+    monitor.reset();
+    EXPECT_EQ(monitor.state(), Monitor::State::kNoReference);
+
+    auto output = monitor.update(
+        make_result(make_base_pose(0.02), make_camera(), true, false), make_camera());
+    EXPECT_EQ(output.state, Monitor::State::kNoReference);
+    EXPECT_FALSE(output.comparison.has_value());
+    EXPECT_EQ(output.inconsistent_count, 0);
+    EXPECT_EQ(feed(monitor, make_base_pose(0.02), false).state, Monitor::State::kNoReference);
+
+    output = feed(monitor, make_base_pose(0.5));
+    EXPECT_EQ(output.state, Monitor::State::kEstablished);
+    ASSERT_TRUE(output.reference.has_value());
+    EXPECT_TRUE(output.reference->isApprox(make_base_pose(0.5), 1e-9));
+    EXPECT_EQ(output.inconsistent_count, 0);
+    EXPECT_TRUE(feed(monitor, make_base_pose(0.501)).comparison->consistent);
+}
+
+// 已夹住：单元偏离参考是预期结果，不比较、不会判为被移动，只输出位移；
+// 计数既不增加也不清零，不可信的帧没有位移
+TEST(ReferenceMonitor, GraspedOnlyReportsDisplacement) {
+    auto monitor = established();
+    EXPECT_EQ(feed(monitor, make_base_pose(0.02)).inconsistent_count, 1);
+
+    const auto reference = make_base_pose(0.);
+    for (int i = 1; i <= 20; i++) {
+        auto pose = reference;
+        pose.translation() += reference.linear().col(2) * 0.01 * i;
+        const auto output = feed(monitor, pose, true, true);
+        EXPECT_EQ(output.state, Monitor::State::kGrasped);
+        EXPECT_TRUE(output.reference.has_value());
+        EXPECT_FALSE(output.comparison.has_value());
+        EXPECT_EQ(output.inconsistent_count, 1);
+        ASSERT_TRUE(output.displacement.has_value());
+        EXPECT_NEAR(output.displacement->total, 0.01 * i, 1e-9);
+        EXPECT_NEAR(output.displacement->along_axis, 0.01 * i, 1e-9);
+    }
+    const auto untrusted = feed(monitor, make_base_pose(0.3), false, true);
+    EXPECT_EQ(untrusted.state, Monitor::State::kGrasped);
+    EXPECT_FALSE(untrusted.displacement.has_value());
+    EXPECT_EQ(monitor.state(), Monitor::State::kGrasped);
+}
+
+// 没有参考时已夹住的帧不建立参考
+TEST(ReferenceMonitor, GraspedFrameDoesNotEstablishReference) {
+    auto monitor = Monitor{};
+    const auto output = feed(monitor, make_base_pose(0.), true, true);
+    EXPECT_EQ(output.state, Monitor::State::kNoReference);
+    EXPECT_FALSE(output.reference.has_value());
+    EXPECT_FALSE(output.displacement.has_value());
+}
+
+// 一致的可信帧把计数清零，所以不一致必须连续
+TEST(ReferenceMonitor, ConsistentFrameResetsCount) {
+    auto monitor = established();
+    for (int round = 0; round < 3; round++) {
+        for (int i = 1; i <= 4; i++)
+            EXPECT_EQ(feed(monitor, make_base_pose(0.02)).inconsistent_count, i);
+        const auto output = feed(monitor, make_base_pose(0.001));
+        EXPECT_TRUE(output.comparison->consistent);
+        EXPECT_EQ(output.inconsistent_count, 0);
+        EXPECT_EQ(output.state, Monitor::State::kEstablished);
+    }
+}
+
+// 相机移动、目标静止：目标在相机系下的位姿变了，换到底座系后仍与参考一致
+TEST(ReferenceMonitor, CameraMotionWithStaticTargetIsConsistent) {
+    auto monitor = Monitor{};
+    const auto target = make_base_pose(0.03, 10.);
+    auto camera = make_camera();
+    monitor.update(make_result(target, camera, true, true), camera);
+    for (int i = 1; i <= 30; i++) {
+        camera = make_camera(2. * i);
+        const auto result = make_result(target, camera, true, true);
+        const auto output = monitor.update(result, camera);
+        EXPECT_EQ(output.state, Monitor::State::kEstablished);
+        ASSERT_TRUE(output.comparison.has_value());
+        EXPECT_TRUE(output.comparison->consistent);
+        EXPECT_NEAR(output.comparison->center_distance, 0., 1e-9);
+        EXPECT_NEAR(output.comparison->axis_deg, 0., 1e-4);
+        EXPECT_EQ(output.inconsistent_count, 0);
+    }
+}
+
+// 位移：总距离和沿参考长轴的分量。参考长轴倾斜时，沿轴分量不等于 z 方向的位移
+TEST(ReferenceMonitor, Displacement) {
+    auto monitor = Monitor{};
+    const auto camera = make_camera();
+    const auto reference = make_base_pose(0., 30.);
+    monitor.update(make_result(reference, camera, true, true), camera);
+
+    // 沿参考长轴移动 40 mm，再沿垂直方向（参考 x 轴）移动 30 mm
+    auto moved = reference;
+    moved.translation() += reference.linear().col(2) * 0.04 + reference.linear().col(0) * 0.03;
+    const auto output = feed(monitor, moved);
+    ASSERT_TRUE(output.displacement.has_value());
+    EXPECT_NEAR(output.displacement->total, 0.05, 1e-9);
+    EXPECT_NEAR(output.displacement->along_axis, 0.04, 1e-9);
+
+    // 反向移动时沿轴分量为负
+    moved = reference;
+    moved.translation() -= reference.linear().col(2) * 0.02;
+    EXPECT_NEAR(feed(monitor, moved).displacement->along_axis, -0.02, 1e-9);
+}
+
+// 阈值和帧数可配置
+TEST(ReferenceMonitor, ConfigurableThresholds) {
+    auto monitor = Monitor{Monitor::Config{
+        .max_center_distance = 0.02, .max_axis_deg = 10., .inconsistent_frames = 2}};
+    const auto camera = make_camera();
+    monitor.update(make_result(make_base_pose(0.), camera, true, true), camera);
+    EXPECT_TRUE(feed(monitor, make_base_pose(0.015, 8.)).comparison->consistent);
+    EXPECT_EQ(feed(monitor, make_base_pose(0.03)).inconsistent_count, 1);
+    EXPECT_EQ(feed(monitor, make_base_pose(0.03)).state, Monitor::State::kMoved);
 }

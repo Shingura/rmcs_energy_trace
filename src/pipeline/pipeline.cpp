@@ -43,6 +43,8 @@ struct Pipeline::Impl {
     supervision::Supervisor supervisor;
 
     State state = State::kSearching;
+    // 到上一帧为止连续可信的处理帧数
+    int trusted_streak = 0;
 
     // 分割网络的输出有 2 个（检测和掩码原型），检测网络只有 1 个；Detector 没有公开这一信息
     static bool network_has_mask(const std::string& path) {
@@ -53,6 +55,7 @@ struct Pipeline::Impl {
     std::expected<void, std::string> initialize(const Config& new_config) {
         initialized = false;
         state = State::kSearching;
+        trusted_streak = 0;
         config = new_config;
         config.tracker.camera = config.camera;
 
@@ -207,6 +210,8 @@ struct Pipeline::Impl {
             search(bgr, depth, result);
         else
             track(bgr, depth, result);
+        trusted_streak = result.trusted ? trusted_streak + 1 : 0;
+        result.stable = state == State::kTracking && trusted_streak >= config.stable_frames;
         diag.timing.total_ms = elapsed_ms(begin);
         return result;
     }

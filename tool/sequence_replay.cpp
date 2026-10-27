@@ -23,6 +23,7 @@
 
 #include "geometry/mesh.hpp"
 #include "pipeline/pipeline.hpp"
+#include "pipeline/reference_monitor.hpp"
 
 #if !defined(RMCS_ENERGY_UNIT_MESH) || !defined(RMCS_ENERGY_TRACE_ASSET_DIR)
 # error "RMCS_ENERGY_UNIT_MESH and RMCS_ENERGY_TRACE_ASSET_DIR must be defined"
@@ -34,6 +35,7 @@
 namespace fs = std::filesystem;
 using rmcs_energy_trace::geometry::Camera;
 using rmcs_energy_trace::pipeline::Pipeline;
+using rmcs_energy_trace::pipeline::ReferenceMonitor;
 using Clock = std::chrono::steady_clock;
 
 namespace {
@@ -55,7 +57,7 @@ struct Options {
     std::string sam_encoder, sam_decoder;
     double fps = 30.;
     double depth_noise = 1.5;
-    int frames = 0; // 0 表示全部
+    int frames = 0;   // 0 表示全部
     bool video = true;
 };
 
@@ -68,6 +70,7 @@ struct Sequence {
     Camera camera;
     int target = 0;
     int frames = 0;
+    double fps = 30.; // 序列的帧率，没有时按 30
 };
 
 // 一帧的记录，对应 frames.csv 的一行
@@ -76,6 +79,8 @@ struct Row {
     bool processed = false;
     std::string state;
     bool trusted = false;
+    bool stable = false;
+    std::string phase;           // 序列的阶段（hold、approach、grasp、extract），没有时为空
     bool has_pose = false;
     int unit = -1;
     bool is_target = false;
@@ -88,6 +93,15 @@ struct Row {
     double detection_iou = kNaN, support = kNaN, free_space = kNaN;
     double end_in_image = kNaN;
     Pipeline::Timing timing;
+    // 参考位姿监视器，meta 里没有 camera 时不运行，monitor 为空
+    std::string monitor;        // no_reference、established、grasped、moved
+    bool attached = false;      // meta 的 attached：目标已被夹住
+    bool reference_set = false; // 这一帧建立了参考
+    bool compared = false;      // 这一帧参与了比较
+    bool consistent = false;
+    int inconsistent_count = 0;
+    double ref_center_mm = kNaN, ref_axis_deg = kNaN;
+    double displacement_mm = kNaN, along_axis_mm = kNaN;
 };
 
 auto median(std::vector<double> values) -> double {
@@ -144,6 +158,8 @@ auto load_sequence(const fs::path& dir) -> std::optional<Sequence> {
     };
     sequence.target = static_cast<int>(storage["target"].real());
     sequence.frames = static_cast<int>(storage["frames"].real());
+    if (const auto fps = storage["fps"]; !fps.empty() && fps.real() > 0.)
+        sequence.fps = fps.real();
     return sequence;
 }
 
@@ -160,6 +176,38 @@ auto load_truth(const fs::path& dir, int frame) -> std::vector<TruthUnit> {
         });
     }
     return units;
+}
+
+// meta 里的相机（OpenCV 坐标系）到世界的位姿，没有时返回空
+auto load_camera_pose(const fs::path& dir, int frame) -> std::optional<Eigen::Isometry3d> {
+    auto storage = cv::FileStorage{
+        (dir / "meta" / (frame_name(frame) + ".json")).string(), cv::FileStorage::READ};
+    if (!storage.isOpened())
+        return std::nullopt;
+    const auto camera = storage["camera"];
+    if (!camera.isSeq() || camera.size() != 4)
+        return std::nullopt;
+    return parse_pose(camera);
+}
+
+// meta 里的 attached（目标已被夹住），没有时视为未夹住
+auto load_attached(const fs::path& dir, int frame) -> bool {
+    auto storage = cv::FileStorage{
+        (dir / "meta" / (frame_name(frame) + ".json")).string(), cv::FileStorage::READ};
+    if (!storage.isOpened())
+        return false;
+    const auto attached = storage["attached"];
+    return !attached.empty() && static_cast<int>(attached.real()) != 0;
+}
+
+// 按规划渲染的序列，meta 里有阶段；内置轨迹的序列没有，返回空字符串
+auto load_phase(const fs::path& dir, int frame) -> std::string {
+    auto storage = cv::FileStorage{
+        (dir / "meta" / (frame_name(frame) + ".json")).string(), cv::FileStorage::READ};
+    if (!storage.isOpened())
+        return {};
+    const auto phase = storage["phase"];
+    return phase.isString() ? phase.string() : std::string{};
 }
 
 // 深度噪声：标准差 = noise_mm * z^2（mm，z 单位 m），另有一部分像素置为无效。
@@ -263,9 +311,9 @@ auto draw_overlay(
     put_text(
         image,
         std::format(
-            "#{} {} {}", row.frame,
+            "#{} {} {} {}", row.frame,
             result.state == Pipeline::State::kTracking ? "tracking" : "searching",
-            result.trusted ? "trusted" : "untrusted"),
+            result.trusted ? "trusted" : "untrusted", result.stable ? "stable" : "unstable"),
         0);
     if (row.has_pose) {
         put_text(
@@ -276,35 +324,179 @@ auto draw_overlay(
             1);
     }
     put_text(image, std::format("{:.0f} ms", row.timing.total_ms), 2);
+    if (!row.phase.empty())
+        put_text(image, std::format("phase {}", row.phase), 3);
+    if (!row.monitor.empty()) {
+        auto text = std::format("ref {}", row.monitor);
+        if (row.compared) {
+            text += std::format(
+                " {} {:.1f} mm {:.1f} deg n={}", row.consistent ? "ok" : "off", row.ref_center_mm,
+                row.ref_axis_deg, row.inconsistent_count);
+        }
+        if (!std::isnan(row.displacement_mm)) {
+            text += std::format(
+                " disp {:.1f} mm axis {:.1f} mm", row.displacement_mm, row.along_axis_mm);
+        }
+        put_text(image, text, 4);
+    }
     return image;
 }
 
 void write_csv(const fs::path& path, const std::vector<Row>& rows) {
     auto out = std::ofstream{path};
-    out << "frame,processed,state,trusted,unit,is_target,center_mm,axis_deg,mask_iou,mask_iou_best,"
+    out << "frame,processed,state,trusted,stable,phase,unit,is_target,center_mm,axis_deg,mask_iou,"
+           "mask_iou_best,"
            "detections,attempted,registered,tracker_ok,health,reason,detection_iou,support,"
-           "free_space,end_in_image,detect_ms,segment_ms,register_ms,track_ms,check_ms,total_ms\n";
+           "free_space,end_in_image,detect_ms,segment_ms,register_ms,track_ms,check_ms,total_ms,"
+           "monitor,attached,reference_set,compared,consistent,inconsistent_count,ref_center_mm,"
+           "ref_axis_deg,displacement_mm,along_axis_mm\n";
     for (const auto& r : rows) {
         out << r.frame << ',' << r.processed << ',' << r.state << ',' << r.trusted << ','
-            << (r.unit >= 0 ? std::to_string(r.unit) : "") << ',' << (r.has_pose ? r.is_target : 0)
-            << ',' << cell(r.center_mm) << ',' << cell(r.axis_deg) << ',' << cell(r.mask_iou) << ','
-            << cell(r.mask_iou_best) << ',' << r.detections << ',' << r.attempted << ','
-            << r.registered << ',' << r.tracker_ok << ',' << r.health << ',' << r.reason << ','
-            << cell(r.detection_iou) << ',' << cell(r.support) << ',' << cell(r.free_space) << ','
-            << cell(r.end_in_image) << ',' << cell(r.timing.detect_ms) << ','
-            << cell(r.timing.segment_ms) << ',' << cell(r.timing.register_ms) << ','
-            << cell(r.timing.track_ms) << ',' << cell(r.timing.check_ms) << ','
-            << cell(r.timing.total_ms) << '\n';
+            << r.stable << ',' << r.phase << ',' << (r.unit >= 0 ? std::to_string(r.unit) : "")
+            << ',' << (r.has_pose ? r.is_target : 0) << ',' << cell(r.center_mm) << ','
+            << cell(r.axis_deg) << ',' << cell(r.mask_iou) << ',' << cell(r.mask_iou_best) << ','
+            << r.detections << ',' << r.attempted << ',' << r.registered << ',' << r.tracker_ok
+            << ',' << r.health << ',' << r.reason << ',' << cell(r.detection_iou) << ','
+            << cell(r.support) << ',' << cell(r.free_space) << ',' << cell(r.end_in_image) << ','
+            << cell(r.timing.detect_ms) << ',' << cell(r.timing.segment_ms) << ','
+            << cell(r.timing.register_ms) << ',' << cell(r.timing.track_ms) << ','
+            << cell(r.timing.check_ms) << ',' << cell(r.timing.total_ms) << ',' << r.monitor << ','
+            << r.attached << ',' << r.reference_set << ',' << r.compared << ',' << r.consistent
+            << ',' << (r.monitor.empty() ? "" : std::to_string(r.inconsistent_count)) << ','
+            << cell(r.ref_center_mm) << ',' << cell(r.ref_axis_deg) << ','
+            << cell(r.displacement_mm) << ',' << cell(r.along_axis_mm) << '\n';
     }
 }
 
-auto summarize(const Options& options, const std::vector<Row>& rows) -> std::string {
+// 一个阶段内的统计
+auto phase_summary(const std::string& phase, const std::vector<Row>& rows) -> std::string {
+    auto processed = 0, trusted = 0, unknown = 0, wrong = 0;
+    auto centers = std::vector<double>{}, axes = std::vector<double>{};
+    for (const auto& r : rows) {
+        if (!r.processed || r.phase != phase)
+            continue;
+        processed++;
+        trusted += r.trusted;
+        unknown += r.health == "unknown";
+        if (r.trusted && r.has_pose) {
+            centers.push_back(r.center_mm);
+            axes.push_back(r.axis_deg);
+            wrong += r.center_mm > kWrongCenterMm || r.axis_deg > kWrongAxisDeg;
+        }
+    }
+    return std::format(
+        "phase {}: processed {} trusted {} ({:.1f}%) unknown {} | trusted center mm median {:.2f} "
+        "max {:.2f} | axis deg median {:.2f} max {:.2f} | wrong accepts {}\n",
+        phase, processed, trusted, processed > 0 ? 100. * trusted / processed : 0., unknown,
+        median(centers), max_of(centers), median(axes), max_of(axes), wrong);
+}
+
+// 参考位姿监视器和盲区的统计。meta 里有 camera 才有监视器；盲区只需要阶段
+auto monitor_summary(const Sequence& sequence, const std::vector<Row>& rows) -> std::string {
+    auto text = std::string{};
+    const auto has_monitor =
+        std::ranges::any_of(rows, [](const Row& r) { return !r.monitor.empty(); });
+    auto phases = std::vector<std::string>{};
+    auto grasp_start = -1, last_trusted = -1, last_trusted_before_grasp = -1;
+    for (const auto& r : rows) {
+        if (!r.phase.empty() && std::ranges::find(phases, r.phase) == phases.end())
+            phases.push_back(r.phase);
+        if (r.phase == "grasp" && grasp_start < 0)
+            grasp_start = r.frame;
+    }
+    for (const auto& r : rows) {
+        if (!r.processed || !r.trusted)
+            continue;
+        last_trusted = r.frame;
+        if (grasp_start >= 0 && r.frame < grasp_start)
+            last_trusted_before_grasp = r.frame;
+    }
+
+    if (has_monitor) {
+        auto established = std::string{}, moved = std::string{};
+        for (const auto& r : rows) {
+            if (r.reference_set)
+                established += std::format("{}{}", established.empty() ? "" : ", ", r.frame);
+            if (r.monitor == "moved")
+                moved += std::format("{}{}", moved.empty() ? "" : ", ", r.frame);
+        }
+        text += std::format(
+            "reference established at frame {}\n", established.empty() ? "none" : established);
+        if (moved.empty()) {
+            text += "target moved: no\n";
+        } else {
+            text += std::format(
+                "target moved at frame {} (the replay calls reset() after each, so the reference "
+                "is re-established at the next stable frame)\n",
+                moved);
+        }
+        for (const auto& phase : phases) {
+            auto compared = 0, inconsistent = 0;
+            for (const auto& r : rows) {
+                if (r.phase != phase || !r.compared)
+                    continue;
+                compared++;
+                inconsistent += !r.consistent;
+            }
+            text += std::format(
+                "phase {}: monitor compared {} inconsistent {}\n", phase, compared, inconsistent);
+        }
+    } else {
+        text += "reference monitor not run (no camera pose in meta)\n";
+    }
+
+    if (grasp_start >= 0) {
+        if (last_trusted_before_grasp >= 0) {
+            text += std::format(
+                "last trusted frame before grasp {} is {:.2f} s before grasp starts (frame {})\n",
+                last_trusted_before_grasp, (grasp_start - last_trusted_before_grasp) / sequence.fps,
+                grasp_start);
+        } else {
+            text += std::format("no trusted frame before grasp starts (frame {})\n", grasp_start);
+        }
+        if (last_trusted >= grasp_start) {
+            text += std::format(
+                "last trusted frame overall {} is {:.2f} s after grasp starts\n", last_trusted,
+                (last_trusted - grasp_start) / sequence.fps);
+        }
+    }
+
+    // extract 阶段最后一个可信帧相对参考的位移
+    if (has_monitor && std::ranges::find(phases, "extract") != phases.end()) {
+        const Row* last = nullptr;
+        for (const auto& r : rows) {
+            if (r.processed && r.trusted && r.phase == "extract")
+                last = &r;
+        }
+        if (last == nullptr) {
+            text += "extract: no trusted frame\n";
+        } else if (std::isnan(last->displacement_mm)) {
+            text += std::format(
+                "extract: last trusted frame {} has no reference to compare\n", last->frame);
+        } else {
+            text += std::format(
+                "extract: last trusted frame {} displacement {:.1f} mm, along axis {:.1f} mm\n",
+                last->frame, last->displacement_mm, last->along_axis_mm);
+        }
+    }
+    return text;
+}
+
+auto summarize(const Options& options, const Sequence& sequence, const std::vector<Row>& rows)
+    -> std::string {
     auto processed = 0, skipped = 0, attempts = 0, successes = 0, reinitialize = 0;
-    auto first_trusted = -1;
+    auto first_trusted = -1, first_stable = -1, motion_start = -1;
+    auto phases = std::vector<std::string>{}; // 按出现顺序
     auto after = 0, after_trusted = 0, wrong = 0, trusted_other = 0;
     auto centers = std::vector<double>{}, axes = std::vector<double>{};
     auto sum = Pipeline::Timing{};
     for (const auto& r : rows) {
+        if (!r.phase.empty()) {
+            if (std::ranges::find(phases, r.phase) == phases.end())
+                phases.push_back(r.phase);
+            if (r.phase != "hold" && motion_start < 0)
+                motion_start = r.frame;
+        }
         if (!r.processed) {
             skipped++;
             continue;
@@ -321,6 +513,8 @@ auto summarize(const Options& options, const std::vector<Row>& rows) -> std::str
         sum.total_ms += r.timing.total_ms;
         if (r.trusted && first_trusted < 0)
             first_trusted = r.frame;
+        if (r.stable && first_stable < 0)
+            first_stable = r.frame;
         if (first_trusted >= 0) {
             after++;
             after_trusted += r.trusted;
@@ -339,6 +533,30 @@ auto summarize(const Options& options, const std::vector<Row>& rows) -> std::str
     text += std::format("frames processed {} skipped {}\n", processed, skipped);
     text += std::format(
         "first trusted frame {}\n", first_trusted >= 0 ? std::to_string(first_trusted) : "none");
+    if (first_stable >= 0) {
+        text += std::format(
+            "first stable frame {} ({:.2f} s at {} fps)\n", first_stable,
+            first_stable / sequence.fps, sequence.fps);
+    } else {
+        text += "first stable frame none\n";
+    }
+    if (!phases.empty()) {
+        if (motion_start >= 0) {
+            text += std::format(
+                "motion starts at frame {} ({:.2f} s)\n", motion_start,
+                motion_start / sequence.fps);
+            if (first_stable >= 0) {
+                const auto lead = (motion_start - first_stable) / sequence.fps;
+                text += std::format(
+                    "stable {} motion start by {:.2f} s\n", lead >= 0. ? "before" : "after",
+                    std::abs(lead));
+            } else {
+                text += "stable never reached before the sequence ended\n";
+            }
+        } else {
+            text += "motion never starts\n";
+        }
+    }
     text += std::format("registration attempts {} successes {}\n", attempts, successes);
     text += std::format("reinitializations {}\n", reinitialize);
     text += std::format(
@@ -359,6 +577,9 @@ auto summarize(const Options& options, const std::vector<Row>& rows) -> std::str
         "check {:.1f} total {:.1f}\n",
         sum.detect_ms / n, sum.segment_ms / n, sum.register_ms / n, sum.track_ms / n,
         sum.check_ms / n, sum.total_ms / n);
+    for (const auto& phase : phases)
+        text += phase_summary(phase, rows);
+    text += monitor_summary(sequence, rows);
     return text;
 }
 
@@ -456,6 +677,7 @@ auto main(int argc, char* argv[]) -> int {
         }
     }
 
+    auto monitor = ReferenceMonitor{};
     auto rows = std::vector<Row>{};
     for (int frame = 0; frame < total;) {
         auto row = Row{};
@@ -488,6 +710,8 @@ auto main(int argc, char* argv[]) -> int {
         row.processed = true;
         row.state = result.state == Pipeline::State::kTracking ? "tracking" : "searching";
         row.trusted = result.trusted;
+        row.stable = result.stable;
+        row.phase = load_phase(options->sequence_dir, frame);
         row.detections = diag.detections.size();
         row.attempted = diag.registration_attempted;
         row.registered = diag.registration.has_value();
@@ -509,6 +733,33 @@ auto main(int argc, char* argv[]) -> int {
             row.free_space = diag.observation->depth.free_space_ratio;
             if (diag.observation->end_in_image_ratio)
                 row.end_in_image = *diag.observation->end_in_image_ratio;
+        }
+
+        // 参考位姿监视：以世界系作底座系，meta 里的相机位姿就是相机到底座
+        if (const auto camera = load_camera_pose(options->sequence_dir, frame)) {
+            row.attached = load_attached(options->sequence_dir, frame);
+            const auto output = monitor.update(result, *camera, row.attached);
+            using MonitorState = ReferenceMonitor::State;
+            row.monitor = output.state == MonitorState::kEstablished ? "established"
+                        : output.state == MonitorState::kGrasped     ? "grasped"
+                        : output.state == MonitorState::kMoved       ? "moved"
+                                                                     : "no_reference";
+            row.reference_set = output.state == MonitorState::kEstablished && !output.comparison
+                             && output.displacement;
+            row.inconsistent_count = output.inconsistent_count;
+            if (output.comparison) {
+                row.compared = true;
+                row.consistent = output.comparison->consistent;
+                row.ref_center_mm = output.comparison->center_distance * 1e3;
+                row.ref_axis_deg = output.comparison->axis_deg;
+            }
+            if (output.displacement) {
+                row.displacement_mm = output.displacement->total * 1e3;
+                row.along_axis_mm = output.displacement->along_axis * 1e3;
+            }
+            // 目标被移动：模拟上层停臂、原地重新初始化，之后在下一个 stable 的帧重新建立参考
+            if (output.state == MonitorState::kMoved)
+                monitor.reset();
         }
 
         // 与真值比较：中心最近的真值单元
@@ -564,12 +815,13 @@ auto main(int argc, char* argv[]) -> int {
             auto& skipped = rows.emplace_back();
             skipped.frame = frame + skip;
             skipped.state = "skipped";
+            skipped.phase = load_phase(options->sequence_dir, frame + skip);
         }
         frame += step;
     }
 
     write_csv(options->output_dir / "frames.csv", rows);
-    const auto summary = summarize(*options, rows);
+    const auto summary = summarize(*options, *sequence, rows);
     std::ofstream{options->output_dir / "summary.txt"} << summary;
     std::print("\n{}", summary);
     return EXIT_SUCCESS;

@@ -104,6 +104,10 @@ Supervisor::Health Supervisor::judge(
         reason = "too few unoccluded pixels to check";
         return Health::kUnknown;
     }
+    if (unoccluded_ratio < config_.min_unoccluded_ratio) {
+        reason = "mostly occluded";
+        return Health::kUnknown;
+    }
     if (depth.free_space_ratio / unoccluded_ratio > config_.max_free_space_ratio) {
         reason = "mesh over background";
         return Health::kBad;
