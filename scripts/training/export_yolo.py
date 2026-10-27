@@ -33,9 +33,11 @@ def main() -> int:
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     destination = args.out_dir / exported.name
-    if destination.exists():
-        shutil.rmtree(destination)
-    shutil.move(str(exported), destination)
+    # Ultralytics 导出到权重文件旁边；权重本来就在输出目录里时，导出结果已经在目标位置
+    if exported.resolve() != destination.resolve():
+        if destination.exists():
+            shutil.rmtree(destination)
+        shutil.move(str(exported), destination)
 
     print(f"exported to {destination}")
     return 0
