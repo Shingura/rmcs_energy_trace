@@ -8,7 +8,7 @@ RMCS 工程机器人的能量单元位姿估计组件。它读取 RGB-D 相机�
 
 流程分为 5 步：
 
-1. **检测**：YOLO 在彩色图中框出能量单元。用 OpenVINO 在 CPU 上推理。
+1. **检测**：YOLO 在彩色图中框出能量单元。用 OpenVINO 在 CPU 上推理。网络可以是检测网络，也可以是 YOLO11-seg 分割网络。分割网络会同时输出每个检测的掩码，这时第 2 步可以直接用它。
 2. **分割**：SAM 以检测框为提示，分出目标能量单元的掩码。检测框里有中心块和相邻的单元，没有掩码时配准会被拒绝。
 3. **初始化**：把掩码内的深度像素转换为点云，用 PPF 粗配准，再用 ICP 精配准，经深度检查后得到初始位姿。
 4. **跟踪**：后续帧用 M3T 从上一帧的位姿开始跟踪，不再每帧做完整配准。
@@ -34,8 +34,9 @@ rmcs_energy_trace/
 │   ├── component.cpp              RMCS 组件：声明输入输出接口，调度各模块
 │   │
 │   ├── detection/                 在彩色图中检测能量单元
-│   │   ├── detector.hpp/.cpp      Detector：缩放并填充图像、OpenVINO 推理、解析输出、NMS，返回检测框和得分
-│   │   └── yolo11.hpp             YOLO11 网络的输入输出约定（640 × 640、输出 [1, 5, 8400]）和预处理设置
+│   │   ├── detector.hpp/.cpp      Detector：缩放并填充图像、OpenVINO 推理，按输出自动判断检测网络或分割网络，返回检测框和得分，分割网络还返回掩码
+│   │   ├── decode.hpp/.cpp        decode_detections：把网络输出和 letterbox 参数解码为检测结果（阈值、NMS、坐标映射、掩码），不依赖推理
+│   │   └── yolo11.hpp             YOLO11 网络的输入输出约定（640 × 640；检测网络输出 [1, 5, 8400]，分割网络输出 [1, 37, 8400] 和 [1, 32, 160, 160]）和预处理设置
 │   │
 │   ├── segmentation/              以检测框为提示分割目标
 │   │   └── segmenter.hpp/.cpp     Segmenter：SAM 的预处理、编码器和解码器推理（OpenVINO）、候选掩码的选择
@@ -189,7 +190,7 @@ dataset/
 /workspaces/RMCS/rmcs_ws/build/rmcs_energy_trace/test_registration
 ```
 
-检测工具对一张图片或一个目录中的图片运行检测，并保存画好框的结果。给出 `--sam` 时，再对每个检测框运行 SAM，把掩码叠加在图上：
+检测工具对一张图片或一个目录中的图片运行检测，并保存画好框的结果。网络是分割网络时，把它输出的掩码用青色叠加在图上。给出 `--sam` 时，再对每个检测框运行 SAM，把 SAM 的掩码用品红色叠加在图上：
 
 ```zsh
 ros2 run rmcs_energy_trace energy_unit_detect <network.xml> <图片或目录> <输出目录> [--conf 0.25] \
@@ -197,6 +198,8 @@ ros2 run rmcs_energy_trace energy_unit_detect <network.xml> <图片或目录> <�
 ```
 
 `network.xml` 由 `scripts/export_yolo.py` 从 Ultralytics 的 `.pt` 权重导出。
+
+分割网络的掩码按 Ultralytics 的 `process_mask_native`（`retina_masks=True`）解码：掩码系数乘原型得到 160 × 160 的 logit，取出未填充图像的区域，双线性缩放到原图尺寸，logit 大于 0 的像素为目标，检测框以外置零。只对 NMS 之后保留的检测解码，并且只计算框内的像素。`Detector::Detection::mask` 的约定与 `Segmenter::Result::mask` 相同。`Timing::mask` 是掩码解码的耗时，不计入 `postprocess`。`test_detection` 用构造的输出张量测试解码，不需要网络文件。
 
 掩码消融工具在合成深度图上比较点云配准只用检测框和再加实例掩码的效果。场景与测试 B 相同，并在目标旁放 1 到 2 个相邻的能量单元（间距 5、20 或 50 mm，直立或平躺，部分试验挡在目标前面）。每帧运行 3 种输入：只用框、框加精确掩码、框加模拟 YOLO-seg 的退化掩码，另有一组无相邻单元的对照。默认 40 次试验。
 

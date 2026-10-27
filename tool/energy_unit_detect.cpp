@@ -93,9 +93,9 @@ auto main(int argc, char* argv[]) -> int {
         const auto timing = detector.last_timing();
 
         std::println(
-            "{}: {} box(es) | pre {:.2f} ms, infer {:.2f} ms, post {:.2f} ms",
+            "{}: {} box(es) | pre {:.2f} ms, infer {:.2f} ms, post {:.2f} ms, mask {:.2f} ms",
             file.filename().string(), detections.size(), timing.preprocess, timing.infer,
-            timing.postprocess);
+            timing.postprocess, timing.mask);
 
         json += std::format(R"({}"{}":[)", json.size() > 1 ? "," : "", file.stem().string());
         auto first = true;
@@ -107,6 +107,14 @@ auto main(int argc, char* argv[]) -> int {
                 R"({}{{"box":[{},{},{},{}],"score":{}}})", first ? "" : ",", d.box.x, d.box.y,
                 d.box.x + d.box.width, d.box.y + d.box.height, d.score);
             first = false;
+
+            // 分割网络给出的掩码用青色叠加，SAM 的用品红色
+            if (!d.mask.empty()) {
+                std::println("    network mask {} px", cv::countNonZero(d.mask));
+                auto tinted = image.clone();
+                tinted.setTo(cv::Scalar{255, 255, 0}, d.mask);
+                cv::addWeighted(image, 0.5, tinted, 0.5, 0., image);
+            }
 
             if (use_sam) {
                 const auto segmented = segmenter.segment(clean, d.box);

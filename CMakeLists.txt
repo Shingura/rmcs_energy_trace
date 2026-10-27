@@ -214,6 +214,10 @@ if(BUILD_TESTING)
   target_link_libraries(test_depth_mask ${PROJECT_NAME})
   set_tests_properties(test_depth_mask PROPERTIES TIMEOUT 10)
 
+  ament_add_gtest(test_detection test/detection.cpp)
+  target_link_libraries(test_detection ${PROJECT_NAME})
+  set_tests_properties(test_detection PROPERTIES TIMEOUT 10)
+
   ament_add_gtest(test_segmentation test/segmentation.cpp)
   target_link_libraries(test_segmentation ${PROJECT_NAME})
   target_compile_definitions(test_segmentation PRIVATE

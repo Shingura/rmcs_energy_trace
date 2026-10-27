@@ -9,14 +9,20 @@
 
 namespace rmcs_energy_trace::detection {
 
-// 能量单元 YOLO11n 单类别检测模型的输入输出约定。
+// 能量单元 YOLO11n 单类别网络的输入输出约定，检测和分割两种网络共用。
 //
 // 输入：u8 BGR NHWC（letterbox 之后），由 OpenVINO 预处理转为 f32 RGB NCHW 并除以 255。
-// 输出：[1, 5, 8400]，没有张量名，按下标访问；每个属性占一行，依次为 cx, cy, w, h, score。
+// 输出没有张量名，按下标访问。坐标在 letterbox 之后的输入中，每个属性占一行：
+// - 检测网络：只有 output 0，[1, 5, 8400]，属性依次为 cx, cy, w, h, score。
+// - 分割网络：output 0 为 [1, 37, 8400]，属性为 cx, cy, w, h, score 和 32 个掩码系数；
+//   output 1 为 [1, 32, 160, 160] 的掩码原型。
 struct Yolo11 {
     static constexpr std::size_t kInputWidth = 640;
     static constexpr std::size_t kInputHeight = 640;
     static constexpr std::size_t kAttributes = 5;
+    static constexpr std::size_t kMaskChannels = 32;
+    static constexpr std::size_t kMaskHeight = 160;
+    static constexpr std::size_t kMaskWidth = 160;
 
     static ov::Shape input_shape() { return ov::Shape{1, kInputHeight, kInputWidth, 3}; }
 

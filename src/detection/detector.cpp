@@ -6,13 +6,15 @@
 #include <cstddef>
 #include <exception>
 #include <memory>
+#include <optional>
+#include <stdexcept>
 
-#include <opencv2/dnn/dnn.hpp>
 #include <opencv2/imgproc.hpp>
 #include <openvino/runtime/compiled_model.hpp>
 #include <openvino/runtime/core.hpp>
 #include <openvino/runtime/exception.hpp>
 
+#include "detection/decode.hpp"
 #include "detection/yolo11.hpp"
 
 namespace rmcs_energy_trace::detection {
@@ -27,14 +29,10 @@ struct Detector::Impl {
     ov::CompiledModel openvino_model;
     ov::InferRequest request;
 
-    Timing timing;
+    // 网络有掩码头（分割网络）
+    bool has_mask = false;
 
-    // letterbox 参数
-    struct Letterbox {
-        float scale = 1.f;
-        int pad_left = 0;
-        int pad_top = 0;
-    };
+    Timing timing;
 
     static double elapsed_ms(Clock::time_point from, Clock::time_point to) noexcept {
         return std::chrono::duration<double, std::milli>(to - from).count();
@@ -47,10 +45,13 @@ struct Detector::Impl {
         try {
             const auto device = config.infer_device.empty() ? "CPU" : config.infer_device;
             openvino_model = Yolo11::compile(openvino_core, config.network_path, device);
+            has_mask = check_outputs(openvino_model);
             request = openvino_model.create_infer_request();
 
             initialized = true;
             return {};
+        } catch (const std::invalid_argument& e) {
+            return std::unexpected{std::string{"Unsupported energy unit network | "} + e.what()};
         } catch (const std::exception& e) {
             return std::unexpected{
                 std::string{"Failed to load energy unit network | "} + e.what(),
@@ -60,6 +61,33 @@ struct Detector::Impl {
                 std::string{"Failed to load energy unit network caused by unknown exception"},
             };
         }
+    }
+
+    // 根据输出判断网络类型：返回是否有掩码头。输出不是检测网络或分割网络时抛出 invalid_argument
+    static bool check_outputs(const ov::CompiledModel& model) {
+        const auto& outputs = model.outputs();
+        const auto shape_of = [&](std::size_t i) {
+            return outputs[i].get_partial_shape().is_static() ? outputs[i].get_shape()
+                                                              : ov::Shape{};
+        };
+
+        // 检测网络：[1, 5, N]
+        if (outputs.size() == 1) {
+            const auto shape = shape_of(0);
+            if (shape.size() == 3 && shape[0] == 1 && shape[1] == Yolo11::kAttributes)
+                return false;
+        }
+        // 分割网络：[1, 4 + 1 + 32, N] 和 [1, 32, 160, 160]
+        if (outputs.size() == 2) {
+            const auto shape = shape_of(0);
+            const auto prototype =
+                ov::Shape{1, Yolo11::kMaskChannels, Yolo11::kMaskHeight, Yolo11::kMaskWidth};
+            if (shape.size() == 3 && shape[0] == 1
+                && shape[1] == Yolo11::kAttributes + Yolo11::kMaskChannels
+                && shape_of(1) == prototype)
+                return true;
+        }
+        throw std::invalid_argument{"outputs are neither a detection nor a segmentation network"};
     }
 
     // 居中 letterbox，填充 (114,114,114)，与训练 / ultralytics 一致
@@ -110,73 +138,41 @@ struct Detector::Impl {
 
             const auto t2 = Clock::now();
 
-            auto result = decode(request.get_output_tensor(0), lb, image.size());
+            auto prediction_tensor = request.get_output_tensor(0);
+            const auto predictions = Predictions{
+                .data = prediction_tensor.data<float>(),
+                .attributes = prediction_tensor.get_shape()[1],
+                .count = prediction_tensor.get_shape()[2],
+            };
+            auto prototypes = std::optional<Prototypes>{};
+            auto prototype_tensor = ov::Tensor{};
+            if (has_mask) {
+                prototype_tensor = request.get_output_tensor(1);
+                const auto& shape = prototype_tensor.get_shape();
+                prototypes = Prototypes{
+                    .data = prototype_tensor.data<float>(),
+                    .channels = shape[1],
+                    .height = shape[2],
+                    .width = shape[3],
+                };
+            }
+
+            auto mask_ms = 0.;
+            auto result = decode_detections(
+                predictions, prototypes, lb, image.size(), config.score_threshold,
+                config.nms_threshold, &mask_ms);
 
             const auto t3 = Clock::now();
             timing = {
                 .preprocess = elapsed_ms(t0, t1),
                 .infer = elapsed_ms(t1, t2),
-                .postprocess = elapsed_ms(t2, t3),
+                .postprocess = elapsed_ms(t2, t3) - mask_ms,
+                .mask = mask_ms,
             };
             return result;
         } catch (...) {
             return {};
         }
-    }
-
-    Detections decode(ov::Tensor tensor, const Letterbox& lb, cv::Size size) const {
-        const auto& shape = tensor.get_shape();
-        // [1, 5, N]，按属性主序存储
-        if (shape.size() != 3 || shape[1] != Yolo11::kAttributes)
-            return {};
-
-        const auto count = shape[2];
-        const auto* data = tensor.data<float>();
-
-        const auto* cx = data;
-        const auto* cy = data + count;
-        const auto* w = data + 2 * count;
-        const auto* h = data + 3 * count;
-        const auto* sc = data + 4 * count;
-
-        auto boxes = std::vector<cv::Rect2d>{};
-        auto scores = std::vector<float>{};
-        for (std::size_t i = 0; i < count; i++) {
-            if (sc[i] < config.score_threshold)
-                continue;
-            boxes.emplace_back(cx[i] - w[i] / 2., cy[i] - h[i] / 2., w[i], h[i]);
-            scores.push_back(sc[i]);
-        }
-
-        auto kept = std::vector<int>{};
-        cv::dnn::NMSBoxes(boxes, scores, config.score_threshold, config.nms_threshold, kept);
-
-        const auto max_x = static_cast<float>(size.width);
-        const auto max_y = static_cast<float>(size.height);
-
-        auto detections = Detections{};
-        detections.reserve(kept.size());
-        for (auto idx : kept) {
-            const auto& b = boxes[static_cast<std::size_t>(idx)];
-
-            const auto x1 = std::clamp(
-                (static_cast<float>(b.x) - static_cast<float>(lb.pad_left)) / lb.scale, 0.f, max_x);
-            const auto y1 = std::clamp(
-                (static_cast<float>(b.y) - static_cast<float>(lb.pad_top)) / lb.scale, 0.f, max_y);
-            const auto x2 = std::clamp(
-                (static_cast<float>(b.x + b.width) - static_cast<float>(lb.pad_left)) / lb.scale,
-                0.f, max_x);
-            const auto y2 = std::clamp(
-                (static_cast<float>(b.y + b.height) - static_cast<float>(lb.pad_top)) / lb.scale,
-                0.f, max_y);
-
-            detections.push_back(
-                Detection{
-                    .box = {x1, y1, x2 - x1, y2 - y1},
-                    .score = scores[static_cast<std::size_t>(idx)],
-                });
-        }
-        return detections;
     }
 };
 
