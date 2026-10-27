@@ -37,8 +37,10 @@ struct Yolo11 {
             .scale(255.0);
         input.model().set_layout("NCHW");
 
+        // 固定 f32：CPU 插件默认在支持的 CPU 上用 bf16，结果会随 CPU 是否支持 bf16 而变
         return core.compile_model(
-            ppp.build(), device, ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY));
+            ppp.build(), device, ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY),
+            ov::hint::inference_precision(ov::element::f32));
     }
 };
 

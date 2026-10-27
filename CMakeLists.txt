@@ -214,6 +214,14 @@ if(BUILD_TESTING)
   target_link_libraries(test_depth_mask ${PROJECT_NAME})
   set_tests_properties(test_depth_mask PROPERTIES TIMEOUT 10)
 
+  ament_add_gtest(test_segmentation test/segmentation.cpp)
+  target_link_libraries(test_segmentation ${PROJECT_NAME})
+  target_compile_definitions(test_segmentation PRIVATE
+    RMCS_ENERGY_UNIT_MESH="${PROJECT_SOURCE_DIR}/meshes/energy_unit.stl"
+    RMCS_ENERGY_TRACE_ASSET_DIR="${PROJECT_SOURCE_DIR}/assets"
+  )
+  set_tests_properties(test_segmentation PROPERTIES TIMEOUT 300)
+
   ament_add_gtest(test_supervision test/supervision.cpp)
   target_link_libraries(test_supervision ${PROJECT_NAME})
   set_tests_properties(test_supervision PROPERTIES TIMEOUT 10)

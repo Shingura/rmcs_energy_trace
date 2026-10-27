@@ -6,14 +6,15 @@ RMCS 工程机器人的能量单元位姿估计组件。它读取 RGB-D 相机�
 
 ## 设计
 
-每帧的处理分为 4 步：
+流程分为 5 步：
 
 1. **检测**：YOLO 在彩色图中框出能量单元。用 OpenVINO 在 CPU 上推理。
-2. **初始化**：把框（或掩码）内的深度像素转换为点云，用 PPF 粗配准，再用 ICP 精配准，经深度检查后得到初始位姿。
-3. **跟踪**：后续帧用 M3T 从上一帧的位姿开始跟踪，不再每帧做完整配准。
-4. **监督**：根据深度一致性、位姿跳变和检测框（有检测结果时），判断跟踪结果是否可信。连续不可信时回到第 1 步重新初始化。
+2. **分割**：SAM 以检测框为提示，分出目标能量单元的掩码。检测框里有中心块和相邻的单元，没有掩码时配准会被拒绝。
+3. **初始化**：把掩码内的深度像素转换为点云，用 PPF 粗配准，再用 ICP 精配准，经深度检查后得到初始位姿。
+4. **跟踪**：后续帧用 M3T 从上一帧的位姿开始跟踪，不再每帧做完整配准。
+5. **监督**：根据深度一致性、位姿跳变和检测框（有检测结果时），判断跟踪结果是否可信。连续不可信时回到第 1 步重新初始化。
 
-整体结构以及监督的判断规则和阈值，参考了 [RCIA_Benmao_Vision](https://github.com/BenmaoNeko/RCIA_Benmao_Vision)（配套文章的许可证为 CC BY-NC-SA 4.0）。该项目用 SAM 和 FoundationPose 做初始化，需要 NVIDIA 显卡。本项目改用 CPU 上的点云配准，代码没有从该项目复制。
+整体结构以及 SAM 的用法、监督的判断规则和阈值，参考了 [RCIA_Benmao_Vision](https://github.com/BenmaoNeko/RCIA_Benmao_Vision)（配套文章的许可证为 CC BY-NC-SA 4.0）。该项目用 SAM 和 FoundationPose 做初始化，需要 NVIDIA 显卡。本项目改用 CPU 上的点云配准，代码没有从该项目复制。
 
 ## 输出接口
 
@@ -35,6 +36,9 @@ rmcs_energy_trace/
 │   ├── detection/                 在彩色图中检测能量单元
 │   │   ├── detector.hpp/.cpp      Detector：缩放并填充图像、OpenVINO 推理、解析输出、NMS，返回检测框和得分
 │   │   └── yolo11.hpp             YOLO11 网络的输入输出约定（640 × 640、输出 [1, 5, 8400]）和预处理设置
+│   │
+│   ├── segmentation/              以检测框为提示分割目标
+│   │   └── segmenter.hpp/.cpp     Segmenter：SAM 的预处理、编码器和解码器推理（OpenVINO）、候选掩码的选择
 │   │
 │   ├── registration/              点云配准，得到初始位姿
 │   │   ├── registration.hpp/.cpp  去平面、PPF 粗配准、ICP 精配准、绕长轴扫描
@@ -64,11 +68,12 @@ rmcs_energy_trace/
 │   ├── registration.cpp           配准：在合成深度图上统计中心误差和长轴误差
 │   ├── depth_mask.cpp             深度图转点云时掩码筛选和收缩的单元测试
 │   ├── point_to_plane.cpp         ICP 求解的单元测试，包括约束不足的输入
+│   ├── segmentation.cpp           分割：中心块场景中 SAM 掩码与真值的重合度，以及用它配准（缺少 SAM 网络时跳过）
 │   ├── supervision.cpp            监督状态机的单元测试
 │   └── tracking.cpp               跟踪：在合成的连续帧上统计误差和耗时，并接上监督（缺少 M3T 模型时跳过）
 │
 ├── tool/                          离线工具
-│   ├── energy_unit_detect.cpp     对图片或目录运行检测，保存画好框的图片
+│   ├── energy_unit_detect.cpp     对图片或目录运行检测（可选再用 SAM 分割），保存画好框和掩码的图片
 │   ├── mask_ablation.cpp          对比实验：配准时只用检测框和加掩码的效果
 │   ├── m3t_generate.cpp           生成 M3T 模型文件（需要 OpenGL 和显示，默认不构建）
 │   └── grasp_sim/                 MoveIt 抓取仿真
@@ -85,7 +90,8 @@ rmcs_energy_trace/
 ├── scripts/
 │   ├── download_assets.sh         下载运行所需的网络和 M3T 模型到 assets/，并校验 SHA256
 │   ├── assets.sha256              要下载的文件清单和校验值
-│   └── export_yolo.py             把 Ultralytics 的 .pt 权重导出为 OpenVINO 格式
+│   ├── export_yolo.py             把 Ultralytics 的 .pt 权重导出为 OpenVINO 格式
+│   └── export_sam.py              把 SAM 的官方权重导出为编码器和解码器两个 ONNX 网络
 │
 ├── config/
 │   ├── energy_trace.yaml          组件参数示例
@@ -115,6 +121,8 @@ scripts/download_assets.sh
 | 文件 | 大小 | 用途 | 来源 |
 |---|---|---|---|
 | `yolo11n_tars.xml`、`yolo11n_tars.bin` | 约 10 MB | YOLO 检测网络（OpenVINO） | TARS 开源的权重，用 `scripts/export_yolo.py` 导出 |
+| `sam_vit_b_encoder.onnx` | 约 343 MB | SAM 编码器 | Meta 官方权重，用 `scripts/export_sam.py` 导出 |
+| `sam_vit_b_decoder.onnx` | 约 16 MB | SAM 解码器 | 同上 |
 | `energy_unit.obj` | 约 106 KB | M3T 使用的 mesh | `m3t_generate` 生成 |
 | `energy_unit_region_model.bin`、`energy_unit_depth_model.bin` | 约 74 MB、70 MB | M3T 的区域模型和深度模型 | `m3t_generate` 生成，需要 OpenGL 和显示器 |
 
@@ -127,7 +135,7 @@ scripts/download_assets.sh
 ```text
 dataset/
 ├── images/                        测试图片
-└── networks/                      原始权重：YOLO 的 .pt
+└── networks/                      原始权重：YOLO 的 .pt、SAM 官方权重 sam_vit_b_01ec64.pth
 ```
 
 ## 配准
@@ -176,10 +184,11 @@ dataset/
 /workspaces/RMCS/rmcs_ws/build/rmcs_energy_trace/test_registration
 ```
 
-检测工具对一张图片或一个目录中的图片运行检测，并保存画好框的结果：
+检测工具对一张图片或一个目录中的图片运行检测，并保存画好框的结果。给出 `--sam` 时，再对每个检测框运行 SAM，把掩码叠加在图上：
 
 ```zsh
-ros2 run rmcs_energy_trace energy_unit_detect <network.xml> <图片或目录> <输出目录> [--conf 0.25]
+ros2 run rmcs_energy_trace energy_unit_detect <network.xml> <图片或目录> <输出目录> [--conf 0.25] \
+    [--sam <encoder.onnx> <decoder.onnx>]
 ```
 
 `network.xml` 由 `scripts/export_yolo.py` 从 Ultralytics 的 `.pt` 权重导出。
@@ -193,6 +202,28 @@ ros2 run rmcs_energy_trace mask_ablation [--trials 40] [--seed 2025] [--mesh <en
 输出每次试验的误差和汇总表（成功率、拒绝次数、接受但错误的次数、中心和轴向误差的中位数与最大值、耗时）。`--trials 120` 约需 11 分钟。
 
 `geometry::depth_to_cloud` 把深度图在框（和掩码）内反投影为点云，掩码先按参数 `mask_erosion_px` 向内腐蚀（配准默认 3 px）。`test_depth_mask` 是它的单元测试。
+
+## 分割（SAM）
+
+`segmentation::Segmenter` 用 SAM（Segment Anything 的 ViT-B 版本）以检测框为提示分割目标，用 OpenVINO 在 CPU 上推理。网络从 Meta 的官方权重导出：
+
+```zsh
+curl -L -o dataset/networks/sam_vit_b_01ec64.pth \
+    https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth
+python3 scripts/export_sam.py dataset/networks/sam_vit_b_01ec64.pth assets \
+    --check dataset/images/6.png 294.6,120.7,399.1,204.1
+```
+
+导出需要 `torch`、`torchvision`、`segment-anything`、`onnx`、`onnxruntime` 和 `opencv-python`。权重只当作数据读取，不执行其中的代码。`--check` 用官方 `SamPredictor` 和导出的网络分割同一张图，打印两者掩码的 IoU。
+
+一次分割分两步：
+
+1. 编码器处理整幅图像：长边缩放到 1024，按官方的均值和方差归一化，右下补零。Ryzen 9600X（12 线程）上约 1.1 s，实机的 Intel CPU 会更慢。
+2. 解码器根据检测框输出 4 个候选掩码，每次约 5 ms。我们按官方 ONNX 部署代码（`SamOnnxModel.select_masks`）对检测框提示的选法，在第 1～3 个候选中取预测 IoU 最高的一个。第 0 个候选（`multimask_output=False`）偶尔只给出端盖这样的局部。
+
+SAM 的效果取决于检测框：框只包住一部分时，掩码也只覆盖那一部分。
+
+`test_segmentation` 在中心块场景上测试：六棱柱中心块按规则手册的尺寸近似，6 根能量单元沿径向插在上面，每次随机去掉 0～2 根非目标单元，一半的场景后面有墙。检测框取目标可见像素的包围框。合格标准是 SAM 掩码与真值的 IoU 中位数不低于 0.9、最低不低于 0.85；用 SAM 掩码配准的成功率不低于 90%，错误接受不超过 1 次。找不到 SAM 网络时测试会跳过。
 
 ## 跟踪（M3T）
 

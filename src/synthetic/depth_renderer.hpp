@@ -84,8 +84,10 @@ public:
     // 初始化并登记第 0 号网格
     void initialize(const geometry::Mesh& mesh, const Config& config) noexcept;
 
-    // 追加登记一个网格，返回其编号
-    std::size_t add_mesh(const geometry::Mesh& mesh) noexcept;
+    // 追加登记一个网格，返回其编号。color 非空时，彩色图中这个网格整体用该颜色（BGR），
+    // 例如中心块；为空时按能量单元的两端深色、中段浅色上色
+    std::size_t add_mesh(
+        const geometry::Mesh& mesh, const std::optional<cv::Vec3b>& color = std::nullopt) noexcept;
 
     // pose 为模型到相机，plane 非空时同时渲染该平面
     Frame render(

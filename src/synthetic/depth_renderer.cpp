@@ -38,12 +38,15 @@ auto saturate(float value) -> std::uint8_t {
 struct DepthRenderer::Impl {
     Config config;
     std::vector<pcl::PointCloud<pcl::PointNormal>::Ptr> dense;
+    // 每个网格的统一颜色，空表示按能量单元的两端深色、中段浅色上色
+    std::vector<std::optional<cv::Vec3b>> mesh_colors;
     // 平面和背景的纹理，仅在配置了彩色图时使用
     cv::Mat plane_texture, background_texture;
 
     void initialize(const geometry::Mesh& mesh, const Config& new_config) noexcept {
         config = new_config;
         dense.clear();
+        mesh_colors.clear();
         if (config.color.has_value()) {
             const auto& color = *config.color;
             plane_texture = make_texture(
@@ -53,11 +56,13 @@ struct DepthRenderer::Impl {
                 config.camera.height, config.camera.width, color.texture_cell_px,
                 color.texture_amplitude, config.seed + 2);
         }
-        add_mesh(mesh);
+        add_mesh(mesh, std::nullopt);
     }
 
-    std::size_t add_mesh(const geometry::Mesh& mesh) noexcept {
+    std::size_t
+        add_mesh(const geometry::Mesh& mesh, const std::optional<cv::Vec3b>& color) noexcept {
         dense.push_back(geometry::sample_surface(mesh, config.sample_count, config.seed));
+        mesh_colors.push_back(color);
         return dense.size() - 1;
     }
 
@@ -147,14 +152,22 @@ struct DepthRenderer::Impl {
             }
         }
         auto color = cv::Mat{};
-        if (config.color.has_value())
-            color = render_color(zbuffer, instance, model_z, engine);
+        if (config.color.has_value()) {
+            // 实例编号 k + 1 对应 objects[k]
+            auto instance_colors = std::vector<std::optional<cv::Vec3b>>(objects.size() + 1);
+            for (std::size_t k = 0; k < objects.size(); k++) {
+                if (objects[k].mesh < mesh_colors.size())
+                    instance_colors[k + 1] = mesh_colors[objects[k].mesh];
+            }
+            color = render_color(zbuffer, instance, model_z, instance_colors, engine);
+        }
         return SceneFrame{depth, instance, color};
     }
 
     // 按每个像素是物体中段、物体两端、平面还是背景上色，再加纹理、模糊和噪声
     auto render_color(
         const cv::Mat1f& zbuffer, const cv::Mat& instance, const cv::Mat1f& model_z,
+        const std::vector<std::optional<cv::Vec3b>>& instance_colors,
         std::mt19937& engine) const noexcept -> cv::Mat {
         const auto& setting = *config.color;
         auto color = cv::Mat(config.camera.height, config.camera.width, CV_8UC3);
@@ -170,6 +183,10 @@ struct DepthRenderer::Impl {
                     base = setting.plane;
                     if (!plane_texture.empty())
                         texture = plane_texture.at<float>(v, u);
+                } else if (
+                    const auto& uniform = instance_colors[instance.at<std::uint8_t>(v, u)];
+                    uniform.has_value()) {
+                    base = *uniform;
                 } else {
                     base = std::abs(model_z(v, u)) > setting.dark_abs_z ? setting.object_dark
                                                                         : setting.object_light;
@@ -223,8 +240,9 @@ void DepthRenderer::initialize(const geometry::Mesh& mesh, const Config& config)
     pimpl_->initialize(mesh, config);
 }
 
-std::size_t DepthRenderer::add_mesh(const geometry::Mesh& mesh) noexcept {
-    return pimpl_->add_mesh(mesh);
+std::size_t DepthRenderer::add_mesh(
+    const geometry::Mesh& mesh, const std::optional<cv::Vec3b>& color) noexcept {
+    return pimpl_->add_mesh(mesh, color);
 }
 
 DepthRenderer::SceneFrame DepthRenderer::render_scene(
