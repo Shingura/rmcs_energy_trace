@@ -212,6 +212,10 @@ if(BUILD_TESTING)
   target_link_libraries(test_depth_mask ${PROJECT_NAME})
   set_tests_properties(test_depth_mask PROPERTIES TIMEOUT 10)
 
+  ament_add_gtest(test_supervision test/supervision.cpp)
+  target_link_libraries(test_supervision ${PROJECT_NAME})
+  set_tests_properties(test_supervision PROPERTIES TIMEOUT 10)
+
   ament_add_gtest(test_point_to_plane test/point_to_plane.cpp)
   target_link_libraries(test_point_to_plane ${PROJECT_NAME})
   set_tests_properties(test_point_to_plane PROPERTIES TIMEOUT 10)

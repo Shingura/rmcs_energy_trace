@@ -17,6 +17,8 @@
 
 #include "geometry/camera.hpp"
 #include "geometry/mesh.hpp"
+#include "registration/depth_check.hpp"
+#include "supervision/supervisor.hpp"
 #include "synthetic/depth_renderer.hpp"
 #include "tracking/tracker.hpp"
 
@@ -27,6 +29,8 @@
 using rmcs_energy_trace::geometry::Camera;
 using rmcs_energy_trace::geometry::load_binary_stl;
 using rmcs_energy_trace::geometry::Mesh;
+using rmcs_energy_trace::registration::DepthCheck;
+using rmcs_energy_trace::supervision::Supervisor;
 using rmcs_energy_trace::synthetic::DepthRenderer;
 using rmcs_energy_trace::tracking::Tracker;
 
@@ -48,10 +52,19 @@ constexpr double kMedianAxisDeg = 1.;
 
 constexpr double kRadToDeg = 180. / std::numbers::pi;
 
+// 监督测试：能量单元从这一帧起离开画面（相机系 x 方向移开 1 m）
+constexpr std::size_t kVanishAt = 75;
+const Eigen::Vector3d kOutOfView{1., 0., 0.};
+
 struct Sequence {
-    std::vector<Eigen::Isometry3d> poses; // 物体到相机
+    std::vector<Eigen::Isometry3d> poses;       // 物体到相机
     std::vector<cv::Mat> color;
     std::vector<cv::Mat> depth;
+};
+
+struct Supervised {
+    std::size_t trusted = 0, unchecked = 0, bad = 0;
+    std::optional<std::size_t> reinitialize_at; // 要求重新初始化的帧
 };
 
 struct Stats {
@@ -160,8 +173,10 @@ protected:
         }
     }
 
-    // 直立在地面上，沿地面平移并绕竖直轴转动。相机朝向地面，俯视 45°
-    static auto make_upright_sequence() -> Sequence {
+    // 直立在地面上，沿地面平移并绕竖直轴转动。相机朝向地面，俯视 45°。
+    // 给出 vanish_at 时，从这一帧起能量单元离开画面
+    static auto make_upright_sequence(std::optional<std::size_t> vanish_at = std::nullopt)
+        -> Sequence {
         constexpr auto tilt = 45. * std::numbers::pi / 180.;
         Eigen::Matrix3d world_to_camera;
         const Eigen::Vector3d forward{std::cos(tilt), 0., -std::sin(tilt)};
@@ -189,6 +204,8 @@ protected:
             pose.linear() = world_to_camera
                           * Eigen::AngleAxisd{yaw, Eigen::Vector3d::UnitZ()}.toRotationMatrix();
             pose.translation() = origin + x * east + y * north;
+            if (vanish_at.has_value() && i >= *vanish_at)
+                pose.translation() += kOutOfView;
             sequence.poses.push_back(pose);
             planes.emplace_back(DepthRenderer::Plane{up, plane_point});
         }
@@ -196,8 +213,10 @@ protected:
         return sequence;
     }
 
-    // 无支撑：任意姿态，旋转和平移都在变化，背景为远处墙面（无地面）
-    static auto make_floating_sequence() -> Sequence {
+    // 无支撑：任意姿态，旋转和平移都在变化，背景为远处墙面（无地面）。
+    // 给出 vanish_at 时，从这一帧起能量单元离开画面
+    static auto make_floating_sequence(std::optional<std::size_t> vanish_at = std::nullopt)
+        -> Sequence {
         auto sequence = Sequence{};
         auto rotation =
             (Eigen::AngleAxisd{60. * std::numbers::pi / 180., Eigen::Vector3d::UnitX()}
@@ -213,6 +232,8 @@ protected:
             auto pose = Eigen::Isometry3d::Identity();
             pose.linear() = rotation;
             pose.translation() = center;
+            if (vanish_at.has_value() && i >= *vanish_at)
+                pose.translation() += kOutOfView;
             sequence.poses.push_back(pose);
             // 每帧的增量转动（相机系），模长不超过 1.1° * sqrt(3) < 2°
             const Eigen::Vector3d step =
@@ -270,6 +291,56 @@ protected:
         return stats;
     }
 
+    // 跟踪并逐帧交给监督。深度检查的 ROI 为 mesh 的投影框，不用掩码
+    static auto run_supervised(
+        const std::string& name, const Sequence& sequence, const Eigen::Isometry3d& initial)
+        -> Supervised {
+        auto tracker = Tracker{};
+        const auto initialized = tracker.initialize(make_config(true, true));
+        EXPECT_TRUE(initialized.has_value()) << initialized.error();
+        const auto started = tracker.start(initial, sequence.color[0], sequence.depth[0]);
+        EXPECT_TRUE(started.has_value()) << started.error();
+        const auto check = DepthCheck{*mesh_, {}};
+        auto supervisor = Supervisor{};
+        supervisor.start(initial);
+
+        auto stats = Supervised{};
+        for (std::size_t i = 1; i < sequence.poses.size(); i++) {
+            const auto result = tracker.track(sequence.color[i], sequence.depth[i]);
+            auto observation = Supervisor::Observation{};
+            if (result.has_value()) {
+                observation.pose = result->pose;
+                observation.depth = check.check(
+                    sequence.depth[i], kCamera, check.projected_box(kCamera, result->pose), {},
+                    result->pose);
+            }
+            const auto decision = supervisor.update(observation);
+            switch (decision.health) {
+            case Supervisor::Health::kGood: stats.trusted++; break;
+            case Supervisor::Health::kBad: stats.bad++; break;
+            case Supervisor::Health::kUnknown: stats.unchecked++; break;
+            }
+            if (decision.health != Supervisor::Health::kGood && result.has_value()) {
+                const auto& truth = sequence.poses[i];
+                std::println(
+                    "[{}] frame {} {}: {} (center error {:.1f} mm, axis error {:.1f} deg)", name, i,
+                    decision.health == Supervisor::Health::kBad ? "bad" : "unchecked",
+                    decision.reason,
+                    (result->pose.translation() - truth.translation()).norm() * 1e3,
+                    axis_error_deg(result->pose, truth));
+            }
+            if (decision.reinitialize) {
+                stats.reinitialize_at = i;
+                std::println("[{}] reinitialize at frame {}: {}", name, i, decision.reason);
+                break;
+            }
+        }
+        std::println(
+            "[{}] supervised: trusted {} bad {} unchecked {}", name, stats.trusted, stats.bad,
+            stats.unchecked);
+        return stats;
+    }
+
     static void expect_tracked(const Stats& stats) {
         EXPECT_EQ(stats.failed, 0U);
         EXPECT_EQ(stats.lost, 0U) << "center error exceeded " << kLossMm << " mm";
@@ -305,6 +376,15 @@ protected:
             initial);
         run((std::string{name} + " region-only exact").c_str(), sequence, make_config(true, false),
             initial);
+
+        // 监督：正常跟踪时不应要求重新初始化，绝大多数帧可信
+        const auto frames = sequence.poses.size() - 1;
+        for (const auto& [label, start] :
+             {std::pair{" exact", initial}, std::pair{" perturbed", perturb(initial)}}) {
+            const auto supervised = run_supervised(std::string{name} + label, sequence, start);
+            EXPECT_FALSE(supervised.reinitialize_at.has_value()) << name << label;
+            EXPECT_GE(supervised.trusted * 100, frames * 95) << name << label;
+        }
     }
 
     static inline std::unique_ptr<Mesh> mesh_;
@@ -328,4 +408,21 @@ TEST_F(TrackingTest, FreeFloating) {
                      << ". Build with -DRMCS_ENERGY_TRACE_BUILD_M3T_TOOLS=ON and run m3t_generate "
                         "(see README).";
     run_case("floating", make_floating_sequence());
+}
+
+// 能量单元在第 kVanishAt 帧离开画面，跟踪器还停在原处：监督要在几帧之内要求重新初始化
+TEST_F(TrackingTest, SupervisorDetectsLoss) {
+    if (!models_available())
+        GTEST_SKIP() << "M3T model files not found in " << RMCS_ENERGY_TRACE_MODEL_DIR
+                     << ". Build with -DRMCS_ENERGY_TRACE_BUILD_M3T_TOOLS=ON and run m3t_generate "
+                        "(see README).";
+    const auto lost_frames = static_cast<std::size_t>(Supervisor::Config{}.bad_frames);
+    for (const auto& [name, sequence] :
+         {std::pair{"upright vanish", make_upright_sequence(kVanishAt)},
+          std::pair{"floating vanish", make_floating_sequence(kVanishAt)}}) {
+        const auto supervised = run_supervised(name, sequence, sequence.poses[0]);
+        ASSERT_TRUE(supervised.reinitialize_at.has_value()) << name;
+        EXPECT_GE(*supervised.reinitialize_at, kVanishAt) << name;
+        EXPECT_LT(*supervised.reinitialize_at, kVanishAt + lost_frames) << name;
+    }
 }

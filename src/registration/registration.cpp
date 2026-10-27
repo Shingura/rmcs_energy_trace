@@ -16,6 +16,7 @@
 
 #include "geometry/depth_cloud.hpp"
 #include "geometry/mesh.hpp"
+#include "registration/depth_check.hpp"
 #include "registration/point_to_plane.hpp"
 
 #include <pcl/ModelCoefficients.h>
@@ -131,8 +132,6 @@ cv::Mat to_ppf_mat(const NormalCloud& cloud) noexcept {
     return mat;
 }
 
-constexpr float kNoDepth = std::numeric_limits<float>::max();
-
 // 评价候选位姿所需的实测深度
 struct DepthView {
     const cv::Mat& depth;
@@ -141,84 +140,13 @@ struct DepthView {
     const cv::Mat& mask; // 空表示不限制
 };
 
-// 把 mesh 的三角形按位姿 (mesh -> camera) 光栅化为 roi 内的 z-buffer (m)，
-// 无覆盖处为 kNoDepth。像素 (u, v) 的中心位于投影坐标 (u, v)，与 depth_to_cloud 一致
-cv::Mat rasterize_depth(
-    const geometry::Mesh& mesh, const Eigen::Isometry3d& pose, const geometry::Camera& camera,
-    const cv::Rect2i& roi) noexcept {
-    auto buffer = cv::Mat{roi.height, roi.width, CV_32FC1, cv::Scalar{kNoDepth}};
-    const Eigen::Matrix3f rotation = pose.linear().cast<float>();
-    const Eigen::Vector3f translation = pose.translation().cast<float>();
-    const auto fx = static_cast<float>(camera.fx);
-    const auto fy = static_cast<float>(camera.fy);
-    const auto cx = static_cast<float>(camera.cx);
-    const auto cy = static_cast<float>(camera.cy);
-    constexpr float kNearPlane = 0.01f;
-    constexpr float kEdgeTolerance = 1e-4f;
-
-    const auto edge = [](const Eigen::Vector2f& a, const Eigen::Vector2f& b,
-                         const Eigen::Vector2f& c) {
-        return (b.x() - a.x()) * (c.y() - a.y()) - (b.y() - a.y()) * (c.x() - a.x());
-    };
-
-    for (const auto& triangle : mesh.triangles) {
-        auto vertices = std::array<Eigen::Vector3f, 3>{};
-        auto projected = std::array<Eigen::Vector2f, 3>{};
-        auto visible = true;
-        for (std::size_t k = 0; k < 3; k++) {
-            vertices[k] = rotation * triangle[k] + translation;
-            if (vertices[k].z() < kNearPlane) {
-                visible = false;
-                break;
-            }
-            projected[k] = {
-                fx * vertices[k].x() / vertices[k].z() + cx,
-                fy * vertices[k].y() / vertices[k].z() + cy};
-        }
-        if (!visible)
-            continue;
-
-        const auto area = edge(projected[0], projected[1], projected[2]);
-        if (std::abs(area) < 1e-9f)
-            continue;
-
-        const auto lo_x = std::min({projected[0].x(), projected[1].x(), projected[2].x()});
-        const auto hi_x = std::max({projected[0].x(), projected[1].x(), projected[2].x()});
-        const auto lo_y = std::min({projected[0].y(), projected[1].y(), projected[2].y()});
-        const auto hi_y = std::max({projected[0].y(), projected[1].y(), projected[2].y()});
-        const auto x0 = std::max(roi.x, static_cast<int>(std::ceil(lo_x)));
-        const auto x1 = std::min(roi.x + roi.width - 1, static_cast<int>(std::floor(hi_x)));
-        const auto y0 = std::max(roi.y, static_cast<int>(std::ceil(lo_y)));
-        const auto y1 = std::min(roi.y + roi.height - 1, static_cast<int>(std::floor(hi_y)));
-
-        for (int v = y0; v <= y1; v++) {
-            auto* row = buffer.ptr<float>(v - roi.y);
-            for (int u = x0; u <= x1; u++) {
-                const Eigen::Vector2f pixel{static_cast<float>(u), static_cast<float>(v)};
-                const auto w0 = edge(projected[1], projected[2], pixel) / area;
-                const auto w1 = edge(projected[2], projected[0], pixel) / area;
-                const auto w2 = 1.f - w0 - w1;
-                if (w0 < -kEdgeTolerance || w1 < -kEdgeTolerance || w2 < -kEdgeTolerance)
-                    continue;
-                // 透视下 1/z 在屏幕空间线性插值
-                const auto inverse_z =
-                    w0 / vertices[0].z() + w1 / vertices[1].z() + w2 / vertices[2].z();
-                const auto z = 1.f / inverse_z;
-                auto& cell = row[u - roi.x];
-                cell = std::min(cell, z);
-            }
-        }
-    }
-    return buffer;
-}
-
 } // namespace
 
 struct Registration::Impl {
     Config config;
     bool initialized = false;
 
-    geometry::Mesh mesh;
+    DepthCheck depth_check;
     // 精配准与内点率使用的外表面点云（2 mm 间距）
     NormalCloud::Ptr refine_model;
     pcl::KdTreeFLANN<pcl::PointXYZ> refine_tree;
@@ -233,7 +161,11 @@ struct Registration::Impl {
         auto loaded = geometry::load_binary_stl(stl_path);
         if (!loaded.has_value())
             return std::unexpected{loaded.error()};
-        mesh = std::move(*loaded);
+        const auto mesh = std::move(*loaded);
+        depth_check = DepthCheck{
+            mesh,
+            {.depth_tolerance = config.depth_tolerance,
+             .silhouette_erosion_px = config.silhouette_erosion_px}};
 
         const auto sampled = geometry::sample_surface(mesh, config.model_sample_count, 42);
         // 体素下采样 PointNormal，体素内法线取平均后归一化，再去掉内腔的点
@@ -396,63 +328,8 @@ struct Registration::Impl {
         return static_cast<double>(inliers) / static_cast<double>(scene.size());
     }
 
-    // 把 mesh 渲染到候选位姿，与实测深度逐像素比较。
-    // 掩码只决定一个像素能否算作支持：掩码外是别的东西，深度相同或更近都说明不了位姿对错，
-    // 不统计；但掩码外看到比 mesh 更远的背景，说明 mesh 所在处是空的，仍记为违例
     Quality assess(const DepthView& view, const Eigen::Isometry3d& pose) const noexcept {
-        auto quality = Quality{};
-        const auto buffer = rasterize_depth(mesh, pose, view.camera, view.roi);
-        auto silhouette = cv::Mat{};
-        cv::compare(buffer, kNoDepth, silhouette, cv::CMP_LT);
-        if (config.silhouette_erosion_px > 0) {
-            const auto size = 2 * config.silhouette_erosion_px + 1;
-            cv::erode(
-                silhouette, silhouette,
-                cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size{size, size}));
-        }
-
-        auto valid = std::size_t{}, supported = std::size_t{}, free_space = std::size_t{},
-             occluded = std::size_t{}, missing = std::size_t{};
-        for (int v = 0; v < view.roi.height; v++) {
-            const auto* model_row = buffer.ptr<float>(v);
-            const auto* silhouette_row = silhouette.ptr<std::uint8_t>(v);
-            const auto* depth_row = view.depth.ptr<std::uint16_t>(v + view.roi.y);
-            const auto* mask_row =
-                view.mask.empty() ? nullptr : view.mask.ptr<std::uint8_t>(v + view.roi.y);
-            for (int u = 0; u < view.roi.width; u++) {
-                if (silhouette_row[u] == 0)
-                    continue;
-                const auto in_mask = mask_row == nullptr || mask_row[u + view.roi.x] != 0;
-                const auto measured = depth_row[u + view.roi.x];
-                if (in_mask) {
-                    quality.model_pixels++;
-                    if (measured == 0)
-                        missing++;
-                }
-                if (measured == 0)
-                    continue;
-                const auto difference =
-                    static_cast<float>(measured * view.camera.depth_scale) - model_row[u];
-                if (difference > config.depth_tolerance) {
-                    free_space++;
-                    valid++;
-                } else if (in_mask) {
-                    valid++;
-                    difference < -config.depth_tolerance ? occluded++ : supported++;
-                }
-            }
-        }
-        if (quality.model_pixels > 0) {
-            quality.missing_ratio =
-                static_cast<double>(missing) / static_cast<double>(quality.model_pixels);
-        }
-        if (valid > 0) {
-            const auto count = static_cast<double>(valid);
-            quality.support_ratio = static_cast<double>(supported) / count;
-            quality.free_space_ratio = static_cast<double>(free_space) / count;
-            quality.occluded_ratio = static_cast<double>(occluded) / count;
-        }
-        return quality;
+        return depth_check.check(view.depth, view.camera, view.roi, view.mask, pose);
     }
 
     // 绕自身长轴转一个周期（120°），取深度检查最好的转角。中心和长轴不变

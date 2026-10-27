@@ -1,6 +1,7 @@
 #pragma once
 
 #include "geometry/camera.hpp"
+#include "registration/depth_check.hpp"
 #include "utility/pimpl.hpp"
 
 #include <cstddef>
@@ -86,26 +87,12 @@ public:
         double total_ms = 0.;
     };
 
-    // 候选位姿的质量。把 mesh 按该位姿渲染到 ROI 内（轮廓向内腐蚀），逐像素与实测深度比较，
-    // 只看有实测深度的像素：
-    //   支持    |z_实测 - z_渲染| < depth_tolerance
-    //   空闲空间违例  z_实测 > z_渲染 + depth_tolerance，即 mesh 所在处看到了更远的东西
-    //   遮挡    z_实测 < z_渲染 - depth_tolerance，即前面有别的东西
-    // 掩码内（没有掩码时为整个 ROI）三类都计入 valid。掩码外只计入空闲空间违例：
-    // 那里深度相同或更近可能是相邻物体，说明不了位姿对错。
-    // 遮挡计入 valid、会降低支持率，这是有意的：否则一个整体落在真实表面后面的错误位姿，
-    // 只剩少数像素参与统计，也能得到很高的支持率。所以没有掩码时，目标被挡住较多会被拒绝。
-    struct Quality {
-        std::size_t model_pixels = 0; // 渲染 mesh 在掩码内的像素数（没有掩码时为 ROI 内）
-        double support_ratio = 0.;    // 支持 / valid
-        double free_space_ratio = 0.; // 空闲空间违例 / valid
-        double occluded_ratio = 0.;   // 遮挡 / valid
-        double missing_ratio = 0.;    // 掩码内无实测深度的像素 / model_pixels
-    };
+    // 候选位姿的深度检查结果，定义见 DepthCheck::Quality
+    using Quality = DepthCheck::Quality;
 
     struct Result {
-        Eigen::Isometry3d pose;       // mesh -> camera
-        double inlier_ratio;          // 场景点中距 mesh 小于 inlier_distance 的比例
+        Eigen::Isometry3d pose; // mesh -> camera
+        double inlier_ratio;    // 场景点中距 mesh 小于 inlier_distance 的比例
         Quality quality;
         Timing timing;
     };

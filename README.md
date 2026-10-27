@@ -11,9 +11,9 @@ RMCS 工程机器人的能量单元位姿估计组件。它读取 RGB-D 相机�
 1. **检测**：YOLO 在彩色图中框出能量单元。用 OpenVINO 在 CPU 上推理。
 2. **初始化**：把框（或掩码）内的深度像素转换为点云，用 PPF 粗配准，再用 ICP 精配准，经深度检查后得到初始位姿。
 3. **跟踪**：后续帧用 M3T 从上一帧的位姿开始跟踪，不再每帧做完整配准。
-4. **监督**：根据检测框与投影的重合度、深度一致性和位姿跳变，判断跟踪结果是否可信。不可信时回到第 2 步重新初始化。
+4. **监督**：根据深度一致性、位姿跳变和检测框（有检测结果时），判断跟踪结果是否可信。连续不可信时回到第 1 步重新初始化。
 
-跟踪和监督的设计参考了 [RCIA_Benmao_Vision](https://github.com/BenmaoNeko/RCIA_Benmao_Vision)。该项目用 SAM 和 FoundationPose 做初始化，需要 NVIDIA 显卡。本项目改用 CPU 上的点云配准。
+整体结构以及监督的判断规则和阈值，参考了 [RCIA_Benmao_Vision](https://github.com/BenmaoNeko/RCIA_Benmao_Vision)（配套文章的许可证为 CC BY-NC-SA 4.0）。该项目用 SAM 和 FoundationPose 做初始化，需要 NVIDIA 显卡。本项目改用 CPU 上的点云配准，代码没有从该项目复制。
 
 ## 输出接口
 
@@ -37,13 +37,17 @@ rmcs_energy_trace/
 │   │   └── yolo11.hpp             YOLO11 网络的输入输出约定（640 × 640、输出 [1, 5, 8400]）和预处理设置
 │   │
 │   ├── registration/              点云配准，得到初始位姿
-│   │   ├── registration.hpp/.cpp  去平面、PPF 粗配准、ICP 精配准、绕长轴扫描、深度检查
+│   │   ├── registration.hpp/.cpp  去平面、PPF 粗配准、ICP 精配准、绕长轴扫描
+│   │   ├── depth_check.hpp/.cpp   DepthCheck：把 mesh 按位姿渲染后与实测深度逐像素比较，配准和监督共用
 │   │   └── point_to_plane.hpp/.cpp ICP 每次迭代的求解：约束不足的方向不移动，不会得到 NaN
 │   │
 │   ├── tracking/                  逐帧跟踪
 │   │   ├── tracker.hpp/.cpp       Tracker：封装 M3T，从初始位姿开始，逐帧输入彩色图和深度图，输出位姿
 │   │   ├── mesh_obj.hpp/.cpp      把 mesh 写成 M3T 读取的 OBJ 文件（单位 m，原点在中心）
 │   │   └── model_files.hpp        M3T 模型文件的文件名和生成参数，生成工具和运行时共用
+│   │
+│   ├── supervision/               判断跟踪结果是否可信
+│   │   └── supervisor.hpp/.cpp    Supervisor：每帧的健康检查和“搜索 / 跟踪”状态机
 │   │
 │   ├── geometry/                  各模块共用的几何类型
 │   │   ├── mesh.hpp/.cpp          读取二进制 STL（mm 转 m，原点移到中心），在表面均匀采样
@@ -60,7 +64,8 @@ rmcs_energy_trace/
 │   ├── registration.cpp           配准：在合成深度图上统计中心误差和长轴误差
 │   ├── depth_mask.cpp             深度图转点云时掩码筛选和收缩的单元测试
 │   ├── point_to_plane.cpp         ICP 求解的单元测试，包括约束不足的输入
-│   └── tracking.cpp               跟踪：在合成的连续帧上统计误差和耗时（缺少 M3T 模型时跳过）
+│   ├── supervision.cpp            监督状态机的单元测试
+│   └── tracking.cpp               跟踪：在合成的连续帧上统计误差和耗时，并接上监督（缺少 M3T 模型时跳过）
 │
 ├── tool/                          离线工具
 │   ├── energy_unit_detect.cpp     对图片或目录运行检测，保存画好框的图片
@@ -112,7 +117,7 @@ dataset/
 3. 每个位姿依次做 ICP、绕长轴扫描、再做 ICP。绕长轴扫描在 120° 内取 12 个角度，选深度检查最好的一个：转角不影响中心和长轴，但筋的位置对不上时支持率偏低，ICP 又很难把转角转回来。
 4. 三个阶段的位姿都按下面的指标比较：先看是否通过验收，再比分数（内点率 + 支持率 − 2 × 空闲空间违例比例）。最好的一个通过验收才返回。
 
-检查方法：按候选位姿把能量单元的 mesh 投影到深度图上，逐像素比较：
+检查方法（`registration::DepthCheck`，监督也用它）：按候选位姿把能量单元的 mesh 投影到深度图上，逐像素比较：
 
 | 指标 | 含义 | 接受条件 |
 |---|---|---|
@@ -185,6 +190,25 @@ env -u WAYLAND_DISPLAY DISPLAY=:0 /workspaces/RMCS/rmcs_ws/build/rmcs_energy_tra
 运行时不需要 OpenGL。库里的 M3T（`m3t_runtime`）用占位头文件编译渲染器，不链接 libGL、GLEW、GLFW，也不会初始化 GL，没有显示的环境也能运行。M3T 的源码在 `third_party/m3t/`，删减内容和本地修改见其中的 `README.md`。
 
 `test_tracking` 在合成的彩色加深度序列上测试（150 帧，每帧最多移动 5 mm、转动 2°，直立在地面上和无支撑两种）。每个序列分别从真值位姿和模拟的配准结果开始跟踪；模拟的配准结果绕长轴偏 60°，再偏 3 mm 和 2°。合格标准是中心误差不超过 10 mm，中位数小于 2 mm，长轴误差中位数小于 1°。找不到模型文件时测试会跳过。
+
+## 监督
+
+`supervision::Supervisor` 每帧判断跟踪结果是否可信，并决定何时重新初始化。它只做判断，不做渲染。调用方每帧传入：
+
+- 跟踪器的位姿，跟踪失败时为空；
+- 这个位姿的深度检查结果：`registration::DepthCheck::check`，ROI 用 `DepthCheck::projected_box`，不用掩码；
+- 可选：这一帧运行了检测时，mesh 投影框与检测框的 IoU。
+
+一帧判为不健康的条件（任一满足）：
+
+- 跟踪失败；
+- 与上一帧相比，中心移动超过 8 cm，或长轴转动超过 30°；
+- 检测框与投影框的 IoU 低于 0.2；
+- 未被遮挡的像素中，“mesh 处看到了更远的背景”超过 15%。
+
+遮挡不算失败，因为抓取时夹爪会挡住能量单元。未被遮挡的像素少于 200 个时，这一帧判为无法判断：不输出可信位姿，也不计入失败。只有健康帧能清零计数。自上一个健康帧起，不健康的帧累计 5 帧，或没有健康帧（不健康或无法判断）的帧累计 30 帧（例如目标离开视野），就回到搜索状态，要求重新初始化；两类帧不要求连续。被判为跳变的帧，其位姿不作为下一帧跳变检查的基准，所以跟踪器停在新位置时，每一帧都判为跳变。跳变、IoU 和 5 帧这几个阈值沿用 RCIA_Benmao_Vision 的默认值。
+
+`test_supervision` 用构造的观测测试状态机。`test_tracking` 把监督接在 M3T 上：正常跟踪时不应要求重新初始化，至少 95% 的帧可信；能量单元在第 75 帧离开画面后，要在 5 帧之内要求重新初始化。
 
 ## 抓取仿真
 
