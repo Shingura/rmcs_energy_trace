@@ -91,7 +91,11 @@ rmcs_energy_trace/
 │   ├── download_assets.sh         下载运行所需的网络和 M3T 模型到 assets/，并校验 SHA256
 │   ├── assets.sha256              要下载的文件清单和校验值
 │   ├── export_yolo.py             把 Ultralytics 的 .pt 权重导出为 OpenVINO 格式
-│   └── export_sam.py              把 SAM 的官方权重导出为编码器和解码器两个 ONNX 网络
+│   ├── export_sam.py              把 SAM 的官方权重导出为编码器和解码器两个 ONNX 网络
+│   └── synth/                     检测网络的合成训练数据
+│       ├── render_dataset.py      在 Blender 中随机搭建取矿场景，渲染彩色图和编号图
+│       ├── make_yolo_dataset.py   把渲染结果转换成 Ultralytics 的分割数据集
+│       └── download_hdri.sh       下载渲染用的室内 HDRI
 │
 ├── config/
 │   ├── energy_trace.yaml          组件参数示例
@@ -135,7 +139,8 @@ scripts/download_assets.sh
 ```text
 dataset/
 ├── images/                        测试图片
-└── networks/                      原始权重：YOLO 的 .pt、SAM 官方权重 sam_vit_b_01ec64.pth
+├── networks/                      原始权重：YOLO 的 .pt、SAM 官方权重 sam_vit_b_01ec64.pth
+└── synthetic/                     合成训练数据：HDRI、渲染结果、数据集和训练输出
 ```
 
 ## 配准
@@ -202,6 +207,58 @@ ros2 run rmcs_energy_trace mask_ablation [--trials 40] [--seed 2025] [--mesh <en
 输出每次试验的误差和汇总表（成功率、拒绝次数、接受但错误的次数、中心和轴向误差的中位数与最大值、耗时）。`--trials 120` 约需 11 分钟。
 
 `geometry::depth_to_cloud` 把深度图在框（和掩码）内反投影为点云，掩码先按参数 `mask_erosion_px` 向内腐蚀（配准默认 3 px）。`test_depth_mask` 是它的单元测试。
+
+## 合成训练数据
+
+我们没有标注好的实拍图，检测网络用 Blender 渲染的合成图训练。脚本在 `scripts/synth/`，HDRI、渲染结果、数据集和训练输出都放在 `dataset/synthetic/` 下。
+
+每帧重新搭建一个取矿场景：
+
+- 资源区的地面、墙和中心块。中心块按规则手册图 4-22 建模，上面插 0～6 根能量单元；
+- 地上横躺或竖立的能量单元；
+- 干扰物，其中一部分是与能量单元大小相近的深色圆柱；
+- 从画面边缘伸进来的遮挡物，模拟自己的夹爪和机械臂。
+
+能量单元只用官方配色。材质、光源、环境贴图和相机位姿都随机。彩色图再按各自的概率叠加相机和镜头的效果：眩光、脏镜头、虚焦、运动模糊、雾化、暗角、色散、传感器噪声，以及曝光和白平衡的变化。
+
+需要的软件：
+
+- Blender 4.5 LTS，官方便携版即可。渲染脚本在 Blender 自带的 Python 中运行。
+- 一个装有 `ultralytics`、`opencv-python` 和 `numpy` 的 Python 环境，用来生成数据集和训练。
+
+在包目录下按顺序运行：
+
+```zsh
+# 1. 下载 13 个室内 HDRI（Poly Haven，CC0），已有的文件会跳过
+scripts/synth/download_hdri.sh
+
+# 2. 渲染 2000 帧，--device 可选 CPU、CUDA、OPTIX
+blender --background --factory-startup --python scripts/synth/render_dataset.py -- \
+    --out dataset/synthetic/raw --count 2000 --seed 0 --device OPTIX
+
+# 3. 生成 Ultralytics 的分割数据集
+python3 scripts/synth/make_yolo_dataset.py dataset/synthetic/raw dataset/synthetic/yolo
+
+# 4. 训练 YOLO11n-seg
+cd dataset/synthetic
+yolo segment train model=yolo11n-seg.pt data=yolo/data.yaml imgsz=640 epochs=100 batch=16 \
+    project=$PWD/runs name=v1
+```
+
+渲染每帧平均约 1.5 s（RTX 5060，OPTIX），只用 CPU 约 7.5 s（Ryzen 9600X）。已有结果的帧会跳过，中断后用同一条命令继续。每帧输出 4 个文件：
+
+| 目录 | 内容 |
+|---|---|
+| `images/` | 彩色图（JPEG） |
+| `index/` | 编号图：每个像素属于第几根能量单元，0 为其他物体 |
+| `full/` | 只渲染能量单元时的编号图，与 `index/` 对比得到各单元被遮挡的比例 |
+| `meta/` | 相机内参、各单元的位姿（mesh 到相机，OpenCV 坐标系，单位 m）和本帧用到的效果 |
+
+镜头效果只作用于彩色图，编号图不受影响。
+
+`make_yolo_dataset.py` 用每根单元的可见像素生成多边形标签。可见像素少于 300 个，或可见部分不到完整轮廓的 20%，这根单元就不标注，留在图中当背景。被遮挡分成几块时，按 Ultralytics 转换 COCO 的做法连成一个多边形。验证集按帧号散列取 10%，`preview/` 下有画出标签的预览图。`data.yaml` 不写 `path`，数据集目录可以整体移动。
+
+训练命令里的 `project=` 要写绝对路径。写相对路径时，Ultralytics 8.3.251 会把输出放到 `~/runs/<任务类型>/` 下。
 
 ## 分割（SAM）
 
