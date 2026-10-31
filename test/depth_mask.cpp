@@ -1,7 +1,9 @@
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <numbers>
+#include <utility>
 
 #include <gtest/gtest.h>
 #include <opencv2/core.hpp>
@@ -98,48 +100,117 @@ TEST(DepthMask, MismatchedMaskGivesEmptyCloud) {
 
 namespace {
 
-// 长轴沿 z 的小 mesh：z = -0.1 处一个三角形（负端），z = 0 处一个（中段），
-// z = 0.09 和 0.11 处各一个（正端）。四个三角形面积相同
-auto make_mesh() -> Mesh {
-    const auto triangle = [](float z) {
-        constexpr auto s = 0.01f;
-        return Mesh::Triangle{
-            Eigen::Vector3f{0.f, -s, z - s}, Eigen::Vector3f{0.f, s, z - s},
-            Eigen::Vector3f{0.f, 0.f, z + 2.f * s}};
+// 长轴沿 z、长 0.15 m 的平板（x = 0 平面，y 方向宽 0.04 m），在 z = ±0.0375 处分段，
+// 两端各一段、中段一段。端部按三角形重心划分：|z| > 半长 / 2
+auto make_plate() -> Mesh {
+    constexpr auto w = 0.02f;
+    const auto quad = [&](float z0, float z1) {
+        return std::array<Mesh::Triangle, 2>{
+            Mesh::Triangle{
+                Eigen::Vector3f{0.f, -w, z0}, Eigen::Vector3f{0.f, w, z0},
+                Eigen::Vector3f{0.f, w, z1}},
+            Mesh::Triangle{
+                Eigen::Vector3f{0.f, -w, z0}, Eigen::Vector3f{0.f, w, z1},
+                Eigen::Vector3f{0.f, -w, z1}}};
     };
-    return {{triangle(-0.1f), triangle(0.f), triangle(0.09f), triangle(0.11f)}};
+    auto mesh = Mesh{};
+    for (const auto& [z0, z1] :
+         {std::pair{-0.075f, -0.0375f}, std::pair{-0.0375f, 0.0375f}, std::pair{0.0375f, 0.075f}}) {
+        for (const auto& triangle : quad(z0, z1))
+            mesh.triangles.push_back(triangle);
+    }
+    return mesh;
 }
 
-// mesh 的 z 轴转到相机的 x 方向，沿 x 平移 tx，距相机 tz
-auto make_pose(double tx, double tz) -> Eigen::Isometry3d {
+constexpr Camera kPlateCamera{
+    .width = 320, .height = 240, .fx = 300., .fy = 300., .cx = 160., .cy = 120.};
+
+// mesh 的 z 轴转到相机的 x 方向（封闭端在 +x 侧），平板正对相机，沿 x 平移 tx，距相机 0.5 m
+auto make_plate_pose(double tx) -> Eigen::Isometry3d {
     auto pose = Eigen::Isometry3d::Identity();
     pose.linear() =
         Eigen::AngleAxisd{std::numbers::pi / 2., Eigen::Vector3d::UnitY()}.toRotationMatrix();
-    pose.translation() = Eigen::Vector3d{tx, 0., tz};
+    pose.translation() = Eigen::Vector3d{tx, 0., 0.5};
     return pose;
+}
+
+// 整幅画面都在 0.5 m 处（平板被支持）。occlude_ends 时，真值位姿下两端所在的列
+// （u < 137.5 和 u > 182.5）换成 0.4 m 处的前景，只露出中段
+auto make_plate_depth(bool occlude_ends) -> cv::Mat {
+    auto depth = cv::Mat{kPlateCamera.height, kPlateCamera.width, CV_16UC1, cv::Scalar{500}};
+    if (occlude_ends) {
+        depth.colRange(0, 138).setTo(400);
+        depth.colRange(183, kPlateCamera.width).setTo(400);
+    }
+    return depth;
 }
 
 } // namespace
 
-// 相机 fx = 60、cx = 32，z = 1 m 处 u = 60 * x + 32，图像宽 64，x 在 [-0.533, 0.525) 内
-TEST(DepthCheck, EndInImageRatioFullyInside) {
-    const auto check = DepthCheck{make_mesh(), {}};
-    EXPECT_DOUBLE_EQ(check.end_in_image_ratio(kCamera, make_pose(0., 1.)), 1.);
+// 没有遮挡的真值位姿：两端都被观测到
+TEST(DepthCheck, EndObservedWithoutOcclusion) {
+    const auto check = DepthCheck{make_plate(), {}};
+    const auto observed =
+        check.end_observed_ratios(make_plate_depth(false), kPlateCamera, make_plate_pose(0.));
+    EXPECT_GT(observed.closed, 0.95);
+    EXPECT_GT(observed.open, 0.95);
 }
 
-// 平移 0.45 m 后正端的重心在 0.54、0.56，都在画面外；中段和负端在画面内
-TEST(DepthCheck, EndInImageRatioOneEndOutside) {
-    const auto check = DepthCheck{make_mesh(), {}};
-    EXPECT_DOUBLE_EQ(check.end_in_image_ratio(kCamera, make_pose(0.45, 1.)), 0.);
+// 两端被前景挡住、只露出中段：真值位姿和沿轴偏 15 mm 的位姿，两端都几乎观测不到。
+// 沿轴偏 15 mm 时中段表面仍与实测深度吻合，这是深度检查的盲区
+TEST(DepthCheck, EndObservedWithEndsOccluded) {
+    const auto check = DepthCheck{make_plate(), {}};
+    const auto depth = make_plate_depth(true);
+    const auto truth = make_plate_pose(0.);
+    const auto shifted = make_plate_pose(0.015);
+
+    EXPECT_LT(check.end_observed_ratios(depth, kPlateCamera, truth).closed, 0.1);
+    const auto observed = check.end_observed_ratios(depth, kPlateCamera, shifted);
+    EXPECT_LT(observed.closed, 0.8);
+    EXPECT_LT(observed.open, 0.8);
+
+    // 中段仍与实测深度吻合
+    const auto quality =
+        check.check(depth, kPlateCamera, check.projected_box(kPlateCamera, shifted), {}, shifted);
+    EXPECT_GT(quality.support_ratio, 0.1);
+    EXPECT_DOUBLE_EQ(quality.free_space_ratio, 0.);
 }
 
-// 平移 0.43 m：正端的重心在 0.52（画面内）和 0.54（画面外）
-TEST(DepthCheck, EndInImageRatioOneEndHalfOutside) {
-    const auto check = DepthCheck{make_mesh(), {}};
-    EXPECT_NEAR(check.end_in_image_ratio(kCamera, make_pose(0.43, 1.)), 0.5, 1e-6);
+// 只有一端被挡住时，另一端不受影响
+TEST(DepthCheck, EndObservedOnlyClosedEndOccluded) {
+    const auto check = DepthCheck{make_plate(), {}};
+    auto depth = make_plate_depth(false);
+    depth.colRange(183, kPlateCamera.width).setTo(400);
+    const auto observed = check.end_observed_ratios(depth, kPlateCamera, make_plate_pose(0.));
+    EXPECT_LT(observed.closed, 0.1);
+    EXPECT_GT(observed.open, 0.95);
 }
 
-TEST(DepthCheck, EndInImageRatioBehindCamera) {
-    const auto check = DepthCheck{make_mesh(), {}};
-    EXPECT_DOUBLE_EQ(check.end_in_image_ratio(kCamera, make_pose(0., -1.)), 0.);
+// 没有实测深度的像素不算被观测到
+TEST(DepthCheck, EndObservedNeedsDepth) {
+    const auto check = DepthCheck{make_plate(), {}};
+    auto depth = make_plate_depth(false);
+    depth.colRange(183, kPlateCamera.width).setTo(0);
+    const auto observed = check.end_observed_ratios(depth, kPlateCamera, make_plate_pose(0.));
+    EXPECT_LT(observed.closed, 0.1);
+    EXPECT_GT(observed.open, 0.95);
+}
+
+// 分母包括画面外的部分：封闭端有一半在画面外时约为 0.5。
+// 封闭端的 u 范围为 160 + 600 tx + [22.5, 45]，tx = 0.2121 时中点在 u = 319.5
+TEST(DepthCheck, EndObservedCountsPartOutsideImage) {
+    const auto check = DepthCheck{make_plate(), {}};
+    const auto observed =
+        check.end_observed_ratios(make_plate_depth(false), kPlateCamera, make_plate_pose(0.2121));
+    EXPECT_NEAR(observed.closed, 0.5, 0.05);
+    EXPECT_GT(observed.open, 0.95);
+}
+
+TEST(DepthCheck, EndObservedBehindCamera) {
+    const auto check = DepthCheck{make_plate(), {}};
+    auto pose = make_plate_pose(0.);
+    pose.translation().z() = -0.5;
+    const auto observed = check.end_observed_ratios(make_plate_depth(false), kPlateCamera, pose);
+    EXPECT_DOUBLE_EQ(observed.closed, 0.);
+    EXPECT_DOUBLE_EQ(observed.open, 0.);
 }

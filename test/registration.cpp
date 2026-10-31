@@ -206,7 +206,10 @@ auto cut_roi(std::vector<Trial> trials, std::uint32_t seed) -> std::vector<Trial
     return trials;
 }
 
-// 在 B 场景的目标前方 10 cm 处放一根竖直细杆（半径 12 mm），横向偏 2 cm，挡住目标约三分之一。
+// 在 B 场景的目标前方 10 cm 处放一根短细杆（半径 12 mm，长 5 cm），横向偏 2 cm，
+// 挡住目标约三分之一的宽度。细杆的轴与目标长轴平行，位于相机到目标中心的视线上，
+// 所以遮挡集中在目标中段（mesh 坐标 |z| < 半长 / 2，最远约 ±3.3 cm），不碰到两端。
+// 不能挡住封闭端：封闭端被挡时配准的验收条件会拒绝（轴向位置只靠封闭端约束），这是有意的。
 // 掩码只含目标的可见像素；检测框取目标单独渲染时的框。地面按 B 场景的约定由位姿推出
 auto occlude(
     const DepthRenderer& renderer, std::size_t rod, std::vector<Trial> trials, double ground_offset,
@@ -216,8 +219,7 @@ auto occlude(
     for (auto& trial : trials) {
         const Eigen::Vector3d center = trial.pose.translation();
         auto rod_pose = Eigen::Isometry3d::Identity();
-        rod_pose.linear() =
-            Eigen::AngleAxisd{std::numbers::pi / 2, Eigen::Vector3d::UnitX()}.toRotationMatrix();
+        rod_pose.linear() = trial.pose.linear();
         rod_pose.translation() =
             center * (1. - 0.10 / center.norm()) + Eigen::Vector3d{0.02, 0., 0.};
         const Eigen::Vector3d up = trial.pose.linear().col(2);
@@ -370,10 +372,11 @@ TEST_F(RegistrationTest, RejectsCylinder) {
     EXPECT_LE(run_negative_trials(*registration_, "cylinder", trials), kMaxNegativeAccepts);
 }
 
-// 带掩码：目标被前方的细杆挡住约三分之一。挡住目标的像素在掩码外，不应影响验收
+// 带掩码：目标中段被前方的细杆挡住约三分之一宽度（不碰到封闭端，见 occlude）。
+// 挡住目标的像素在掩码外，不应影响验收
 TEST_F(RegistrationTest, OccludedWithMask) {
     auto renderer = make_renderer(*mesh_);
-    const auto rod = renderer->add_mesh(make_cylinder(0.012f, 0.30f));
+    const auto rod = renderer->add_mesh(make_cylinder(0.012f, 0.05f));
     const auto offset = half_length(*mesh_);
     const auto trials =
         occlude(*renderer, rod, make_trials_b(*renderer, 9001, kMaskTrials, offset), offset, 9101);

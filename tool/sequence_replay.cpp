@@ -24,6 +24,7 @@
 #include "geometry/mesh.hpp"
 #include "pipeline/pipeline.hpp"
 #include "pipeline/reference_monitor.hpp"
+#include "registration/depth_check.hpp"
 
 #if !defined(RMCS_ENERGY_UNIT_MESH) || !defined(RMCS_ENERGY_TRACE_ASSET_DIR)
 # error "RMCS_ENERGY_UNIT_MESH and RMCS_ENERGY_TRACE_ASSET_DIR must be defined"
@@ -91,7 +92,8 @@ struct Row {
     bool attempted = false, registered = false, tracker_ok = false;
     std::string health, reason;
     double detection_iou = kNaN, support = kNaN, free_space = kNaN;
-    double end_in_image = kNaN;
+    // 诊断：位姿处两端被观测到的比例，不传给监督器
+    double closed_end_observed = kNaN, open_end_observed = kNaN;
     Pipeline::Timing timing;
     // 参考位姿监视器，meta 里没有 camera 时不运行，monitor 为空
     std::string monitor;        // no_reference、established、grasped、moved
@@ -347,7 +349,8 @@ void write_csv(const fs::path& path, const std::vector<Row>& rows) {
     out << "frame,processed,state,trusted,stable,phase,unit,is_target,center_mm,axis_deg,mask_iou,"
            "mask_iou_best,"
            "detections,attempted,registered,tracker_ok,health,reason,detection_iou,support,"
-           "free_space,end_in_image,detect_ms,segment_ms,register_ms,track_ms,check_ms,total_ms,"
+           "free_space,closed_end_observed,open_end_observed,detect_ms,segment_ms,register_ms,"
+           "track_ms,check_ms,total_ms,"
            "monitor,attached,reference_set,compared,consistent,inconsistent_count,ref_center_mm,"
            "ref_axis_deg,displacement_mm,along_axis_mm\n";
     for (const auto& r : rows) {
@@ -357,12 +360,13 @@ void write_csv(const fs::path& path, const std::vector<Row>& rows) {
             << cell(r.axis_deg) << ',' << cell(r.mask_iou) << ',' << cell(r.mask_iou_best) << ','
             << r.detections << ',' << r.attempted << ',' << r.registered << ',' << r.tracker_ok
             << ',' << r.health << ',' << r.reason << ',' << cell(r.detection_iou) << ','
-            << cell(r.support) << ',' << cell(r.free_space) << ',' << cell(r.end_in_image) << ','
-            << cell(r.timing.detect_ms) << ',' << cell(r.timing.segment_ms) << ','
-            << cell(r.timing.register_ms) << ',' << cell(r.timing.track_ms) << ','
-            << cell(r.timing.check_ms) << ',' << cell(r.timing.total_ms) << ',' << r.monitor << ','
-            << r.attached << ',' << r.reference_set << ',' << r.compared << ',' << r.consistent
-            << ',' << (r.monitor.empty() ? "" : std::to_string(r.inconsistent_count)) << ','
+            << cell(r.support) << ',' << cell(r.free_space) << ',' << cell(r.closed_end_observed)
+            << ',' << cell(r.open_end_observed) << ',' << cell(r.timing.detect_ms) << ','
+            << cell(r.timing.segment_ms) << ',' << cell(r.timing.register_ms) << ','
+            << cell(r.timing.track_ms) << ',' << cell(r.timing.check_ms) << ','
+            << cell(r.timing.total_ms) << ',' << r.monitor << ',' << r.attached << ','
+            << r.reference_set << ',' << r.compared << ',' << r.consistent << ','
+            << (r.monitor.empty() ? "" : std::to_string(r.inconsistent_count)) << ','
             << cell(r.ref_center_mm) << ',' << cell(r.ref_axis_deg) << ','
             << cell(r.displacement_mm) << ',' << cell(r.along_axis_mm) << '\n';
     }
@@ -657,6 +661,7 @@ auto main(int argc, char* argv[]) -> int {
         std::println(stderr, "{}", mesh.error());
         return EXIT_FAILURE;
     }
+    const auto depth_check = rmcs_energy_trace::registration::DepthCheck{*mesh, config.depth_check};
     auto vertices = std::vector<Eigen::Vector3f>{};
     for (const auto& triangle : mesh->triangles)
         vertices.insert(vertices.end(), triangle.begin(), triangle.end());
@@ -737,8 +742,19 @@ auto main(int argc, char* argv[]) -> int {
                 row.detection_iou = *diag.observation->detection_iou;
             row.support = diag.observation->depth.support_ratio;
             row.free_space = diag.observation->depth.free_space_ratio;
-            if (diag.observation->end_in_image_ratio)
-                row.end_in_image = *diag.observation->end_in_image_ratio;
+        }
+
+        // 诊断：跟踪状态用跟踪位姿，搜索状态配准成功的帧用配准位姿；跟踪失败的帧没有值
+        if (result.state == Pipeline::State::kTracking && result.pose) {
+            const auto observed =
+                depth_check.end_observed_ratios(noisy, sequence->camera, *result.pose);
+            row.closed_end_observed = observed.closed;
+            row.open_end_observed = observed.open;
+        } else if (diag.registration) {
+            row.closed_end_observed = diag.registration->closed_end_observed;
+            row.open_end_observed =
+                depth_check.end_observed_ratios(noisy, sequence->camera, diag.registration->pose)
+                    .open;
         }
 
         // 参考位姿监视：以世界系作底座系，meta 里的相机位姿就是相机到底座

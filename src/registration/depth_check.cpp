@@ -17,10 +17,14 @@ constexpr float kNoDepth = std::numeric_limits<float>::max();
 
 // 把 mesh 的三角形按位姿 (mesh -> camera) 光栅化为 roi 内的 z-buffer (m)，
 // 无覆盖处为 kNoDepth。像素 (u, v) 的中心位于投影坐标 (u, v)，与 depth_to_cloud 一致
+// labels 非空时同时输出每个像素最近三角形所属的部分：0 中段，1 封闭端（z > 0），2 开口端（z < 0）。
+// 端部的划分：重心 |z| 大于半长的一半
 cv::Mat rasterize_depth(
     const geometry::Mesh& mesh, const Eigen::Isometry3d& pose, const geometry::Camera& camera,
-    const cv::Rect2i& roi) noexcept {
+    const cv::Rect2i& roi, float half_length = 0.f, cv::Mat* labels = nullptr) noexcept {
     auto buffer = cv::Mat{roi.height, roi.width, CV_32FC1, cv::Scalar{kNoDepth}};
+    if (labels != nullptr)
+        *labels = cv::Mat{roi.height, roi.width, CV_8UC1, cv::Scalar{0}};
     const Eigen::Matrix3f rotation = pose.linear().cast<float>();
     const Eigen::Vector3f translation = pose.translation().cast<float>();
     const auto fx = static_cast<float>(camera.fx);
@@ -51,6 +55,12 @@ cv::Mat rasterize_depth(
         }
         if (!visible)
             continue;
+        auto label = std::uint8_t{0};
+        if (labels != nullptr) {
+            const auto centroid_z = (triangle[0].z() + triangle[1].z() + triangle[2].z()) / 3.f;
+            if (std::abs(centroid_z) > half_length / 2.f)
+                label = centroid_z > 0.f ? 1 : 2;
+        }
 
         const auto area = edge(projected[0], projected[1], projected[2]);
         if (std::abs(area) < 1e-9f)
@@ -79,11 +89,74 @@ cv::Mat rasterize_depth(
                     w0 / vertices[0].z() + w1 / vertices[1].z() + w2 / vertices[2].z();
                 const auto z = 1.f / inverse_z;
                 auto& cell = row[u - roi.x];
-                cell = std::min(cell, z);
+                if (z < cell) {
+                    cell = z;
+                    if (labels != nullptr)
+                        labels->at<std::uint8_t>(v - roi.y, u - roi.x) = label;
+                }
             }
         }
     }
     return buffer;
+}
+
+// 渲染轮廓：有覆盖的像素，向内腐蚀
+cv::Mat make_silhouette(const cv::Mat& buffer, int erosion_px) noexcept {
+    auto silhouette = cv::Mat{};
+    cv::compare(buffer, kNoDepth, silhouette, cv::CMP_LT);
+    if (erosion_px > 0) {
+        const auto size = 2 * erosion_px + 1;
+        cv::erode(
+            silhouette, silhouette,
+            cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size{size, size}));
+    }
+    return silhouette;
+}
+
+// 逐像素分类：没有实测深度、支持、空闲空间违例、遮挡
+enum class PixelClass { kMissing, kSupported, kFreeSpace, kOccluded };
+
+PixelClass classify_pixel(
+    std::uint16_t measured, float model_depth, double depth_scale, float tolerance) noexcept {
+    if (measured == 0)
+        return PixelClass::kMissing;
+    const auto difference = static_cast<float>(measured * depth_scale) - model_depth;
+    if (difference > tolerance)
+        return PixelClass::kFreeSpace;
+    if (difference < -tolerance)
+        return PixelClass::kOccluded;
+    return PixelClass::kSupported;
+}
+
+// mesh 投影的未裁剪像素包围框（可以超出画面）；mesh 有顶点在相机后方或为空时为空
+cv::Rect2i unclipped_box(
+    const geometry::Mesh& mesh, const geometry::Camera& camera,
+    const Eigen::Isometry3d& pose) noexcept {
+    const Eigen::Matrix3f rotation = pose.linear().cast<float>();
+    const Eigen::Vector3f translation = pose.translation().cast<float>();
+    auto lower =
+        Eigen::Vector2f{std::numeric_limits<float>::max(), std::numeric_limits<float>::max()};
+    auto upper =
+        Eigen::Vector2f{std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest()};
+    for (const auto& triangle : mesh.triangles) {
+        for (const auto& vertex : triangle) {
+            const Eigen::Vector3f p = rotation * vertex + translation;
+            if (p.z() <= 0.f)
+                return {};
+            const Eigen::Vector2f pixel{
+                static_cast<float>(camera.fx) * p.x() / p.z() + static_cast<float>(camera.cx),
+                static_cast<float>(camera.fy) * p.y() / p.z() + static_cast<float>(camera.cy)};
+            lower = lower.cwiseMin(pixel);
+            upper = upper.cwiseMax(pixel);
+        }
+    }
+    if (mesh.triangles.empty())
+        return {};
+    const auto left = static_cast<int>(std::floor(lower.x()));
+    const auto top = static_cast<int>(std::floor(lower.y()));
+    const auto right = static_cast<int>(std::ceil(upper.x()));
+    const auto bottom = static_cast<int>(std::ceil(upper.y()));
+    return cv::Rect2i{left, top, right - left + 1, bottom - top + 1};
 }
 
 } // namespace
@@ -114,14 +187,7 @@ DepthCheck::Quality DepthCheck::check(
         return quality;
 
     const auto buffer = rasterize_depth(mesh_, pose, camera, rect);
-    auto silhouette = cv::Mat{};
-    cv::compare(buffer, kNoDepth, silhouette, cv::CMP_LT);
-    if (config_.silhouette_erosion_px > 0) {
-        const auto size = 2 * config_.silhouette_erosion_px + 1;
-        cv::erode(
-            silhouette, silhouette,
-            cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size{size, size}));
-    }
+    const auto silhouette = make_silhouette(buffer, config_.silhouette_erosion_px);
 
     // 掩码只决定一个像素能否算作支持：掩码外是别的东西，深度相同或更近都说明不了位姿对错，
     // 不统计；但掩码外看到比 mesh 更远的背景，说明 mesh 所在处是空的，仍记为违例
@@ -136,24 +202,26 @@ DepthCheck::Quality DepthCheck::check(
             if (silhouette_row[u] == 0)
                 continue;
             const auto in_mask = mask_row == nullptr || mask_row[u + rect.x] != 0;
-            const auto measured = depth_row[u + rect.x];
-            if (in_mask) {
+            if (in_mask)
                 quality.model_pixels++;
-                if (measured == 0)
+            switch (classify_pixel(
+                depth_row[u + rect.x], model_row[u], camera.depth_scale, config_.depth_tolerance)) {
+            case PixelClass::kMissing:
+                if (in_mask)
                     missing++;
-            }
-            if (measured == 0)
                 continue;
-            const auto difference =
-                static_cast<float>(measured * camera.depth_scale) - model_row[u];
-            if (difference > config_.depth_tolerance)
-                free_space++;
-            else if (!in_mask)
-                continue;
-            else if (difference < -config_.depth_tolerance)
+            case PixelClass::kFreeSpace: free_space++; break;
+            case PixelClass::kOccluded:
+                if (!in_mask)
+                    continue;
                 occluded++;
-            else
+                break;
+            case PixelClass::kSupported:
+                if (!in_mask)
+                    continue;
                 supported++;
+                break;
+            }
             quality.valid_pixels++;
         }
     }
@@ -172,60 +240,53 @@ DepthCheck::Quality DepthCheck::check(
 
 cv::Rect2i DepthCheck::projected_box(
     const geometry::Camera& camera, const Eigen::Isometry3d& pose) const noexcept {
-    const Eigen::Matrix3f rotation = pose.linear().cast<float>();
-    const Eigen::Vector3f translation = pose.translation().cast<float>();
-    auto lower =
-        Eigen::Vector2f{std::numeric_limits<float>::max(), std::numeric_limits<float>::max()};
-    auto upper =
-        Eigen::Vector2f{std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest()};
-    for (const auto& triangle : mesh_.triangles) {
-        for (const auto& vertex : triangle) {
-            const Eigen::Vector3f p = rotation * vertex + translation;
-            if (p.z() <= 0.f)
-                return {};
-            const Eigen::Vector2f pixel{
-                static_cast<float>(camera.fx) * p.x() / p.z() + static_cast<float>(camera.cx),
-                static_cast<float>(camera.fy) * p.y() / p.z() + static_cast<float>(camera.cy)};
-            lower = lower.cwiseMin(pixel);
-            upper = upper.cwiseMax(pixel);
-        }
-    }
-    if (mesh_.triangles.empty())
-        return {};
-    const auto left = static_cast<int>(std::floor(lower.x()));
-    const auto top = static_cast<int>(std::floor(lower.y()));
-    const auto right = static_cast<int>(std::ceil(upper.x()));
-    const auto bottom = static_cast<int>(std::ceil(upper.y()));
-    return cv::Rect2i{left, top, right - left + 1, bottom - top + 1}
-         & cv::Rect2i{0, 0, camera.width, camera.height};
+    return unclipped_box(mesh_, camera, pose) & cv::Rect2i{0, 0, camera.width, camera.height};
 }
 
-double DepthCheck::end_in_image_ratio(
-    const geometry::Camera& camera, const Eigen::Isometry3d& pose) const noexcept {
-    const Eigen::Matrix3f rotation = pose.linear().cast<float>();
-    const Eigen::Vector3f translation = pose.translation().cast<float>();
-    // 下标 0 为 z < 0 的端部，1 为 z > 0 的端部
-    auto total = std::array<double, 2>{};
-    auto inside = std::array<double, 2>{};
-    for (const auto& triangle : mesh_.triangles) {
-        const Eigen::Vector3f centroid = (triangle[0] + triangle[1] + triangle[2]) / 3.f;
-        if (std::abs(centroid.z()) <= half_length_ / 2.f)
-            continue;
-        const auto end = centroid.z() > 0.f ? 1 : 0;
-        const auto area = static_cast<double>(geometry::Mesh::area(triangle));
-        total[end] += area;
-        const Eigen::Vector3f center = rotation * centroid + translation;
-        if (center.z() <= 0.f)
-            continue;
-        const auto u = camera.fx * center.x() / center.z() + camera.cx;
-        const auto v = camera.fy * center.y() / center.z() + camera.cy;
-        // 像素 (u, v) 的中心在投影坐标 (u, v)，图像覆盖 [-0.5, width - 0.5)
-        if (u >= -0.5 && u < camera.width - 0.5 && v >= -0.5 && v < camera.height - 0.5)
-            inside[end] += area;
+DepthCheck::EndObserved DepthCheck::end_observed_ratios(
+    const cv::Mat& depth, const geometry::Camera& camera,
+    const Eigen::Isometry3d& pose) const noexcept {
+    auto result = EndObserved{};
+    auto box = unclipped_box(mesh_, camera, pose);
+    if (depth.type() != CV_16UC1 || box.empty())
+        return result;
+    // 留出腐蚀用的边，使画面外的轮廓也按同样的方式腐蚀
+    const auto margin = config_.silhouette_erosion_px + 1;
+    box =
+        cv::Rect2i{box.x - margin, box.y - margin, box.width + 2 * margin, box.height + 2 * margin};
+
+    auto labels = cv::Mat{};
+    const auto buffer = rasterize_depth(mesh_, pose, camera, box, half_length_, &labels);
+    const auto silhouette = make_silhouette(buffer, config_.silhouette_erosion_px);
+
+    // 下标 0 为封闭端（z > 0），1 为开口端（z < 0）
+    auto total = std::array<std::size_t, 2>{};
+    auto observed = std::array<std::size_t, 2>{};
+    for (int v = 0; v < box.height; v++) {
+        const auto* model_row = buffer.ptr<float>(v);
+        const auto* silhouette_row = silhouette.ptr<std::uint8_t>(v);
+        const auto* label_row = labels.ptr<std::uint8_t>(v);
+        const auto image_v = v + box.y;
+        for (int u = 0; u < box.width; u++) {
+            if (silhouette_row[u] == 0 || label_row[u] == 0)
+                continue;
+            const auto end = label_row[u] - 1;
+            total[end]++;
+            const auto image_u = u + box.x;
+            if (image_u < 0 || image_u >= depth.cols || image_v < 0 || image_v >= depth.rows)
+                continue;
+            const auto kind = classify_pixel(
+                depth.at<std::uint16_t>(image_v, image_u), model_row[u], camera.depth_scale,
+                config_.depth_tolerance);
+            if (kind == PixelClass::kSupported || kind == PixelClass::kFreeSpace)
+                observed[end]++;
+        }
     }
-    if (total[0] <= 0. || total[1] <= 0.)
-        return 0.;
-    return std::min(inside[0] / total[0], inside[1] / total[1]);
+    if (total[0] > 0)
+        result.closed = static_cast<double>(observed[0]) / static_cast<double>(total[0]);
+    if (total[1] > 0)
+        result.open = static_cast<double>(observed[1]) / static_cast<double>(total[1]);
+    return result;
 }
 
 } // namespace rmcs_energy_trace::registration

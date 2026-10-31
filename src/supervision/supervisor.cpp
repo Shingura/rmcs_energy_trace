@@ -89,10 +89,11 @@ Supervisor::Health Supervisor::judge(
         return Health::kBad;
     }
 
-    // 一端在画面外时，位姿沿轴线的位置没有约束，下面的深度统计也只覆盖画面内的部分
-    if (observation.end_in_image_ratio.has_value()
-        && *observation.end_in_image_ratio < config_.min_end_in_image_ratio) {
-        reason = "an end is outside the image";
+    // 封闭端没有被观测到（被遮挡、没有深度或在画面外）时，位姿沿轴线的位置没有约束，
+    // 下面的深度统计看不出来
+    if (observation.closed_end_observed_ratio.has_value()
+        && *observation.closed_end_observed_ratio < config_.min_closed_end_observed_ratio) {
+        reason = "closed end is not observed";
         return Health::kUnknown;
     }
 

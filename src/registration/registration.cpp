@@ -359,7 +359,8 @@ struct Registration::Impl {
         return candidate.inlier_ratio >= config.min_inlier_ratio
             && quality.model_pixels >= config.min_model_pixels
             && quality.support_ratio >= config.min_support_ratio
-            && quality.free_space_ratio <= config.max_free_space_ratio;
+            && quality.free_space_ratio <= config.max_free_space_ratio
+            && candidate.closed_end_observed >= config.min_closed_end_observed_ratio;
     }
 
     // 候选之间的比较：先看是否通过验收，再比分数。
@@ -389,6 +390,8 @@ struct Registration::Impl {
                 .pose = pose,
                 .inlier_ratio = inlier_ratio(*scene, pose),
                 .quality = assess(view, pose),
+                .closed_end_observed =
+                    depth_check.end_observed_ratios(view.depth, view.camera, pose).closed,
                 .timing = {}};
             timing.quality_ms += elapsed_ms(begin);
             if (!best.has_value() || better(candidate, *best))

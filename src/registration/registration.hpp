@@ -76,6 +76,10 @@ public:
         // 0.8 倍缩小的 mesh 最好的候选支持率约 0.83、违例 >= 0.07
         float min_support_ratio = 0.88f;
         float max_free_space_ratio = 0.06f;
+        // 封闭端被观测到的像素比例（DepthCheck::end_observed_ratios 的 closed）下限。
+        // 轴向位置只靠封闭端约束，封闭端被遮挡或没有深度时，沿轴偏移的位姿也能通过上面的检查；
+        // 初始化时存下轴向不确定的参考位姿后果最严重。观察阶段正确帧最低 0.87
+        float min_closed_end_observed_ratio = 0.8f;
     };
 
     struct Timing {
@@ -91,9 +95,11 @@ public:
     using Quality = DepthCheck::Quality;
 
     struct Result {
-        Eigen::Isometry3d pose; // mesh -> camera
-        double inlier_ratio;    // 场景点中距 mesh 小于 inlier_distance 的比例
+        Eigen::Isometry3d pose;     // mesh -> camera
+        double inlier_ratio;        // 场景点中距 mesh 小于 inlier_distance 的比例
         Quality quality;
+        double closed_end_observed; // 封闭端被观测到的像素比例，见
+                                    // Config::min_closed_end_observed_ratio
         Timing timing;
     };
 
@@ -102,7 +108,7 @@ public:
     std::expected<void, std::string> initialize(const std::string& stl_path) noexcept;
 
     // 深度图 -> 点云（按 mask_erosion_px 处理掩码）-> 配准 -> 深度一致性检查。
-    // mask 为空表示只用 roi。未通过验收（内点率、支持率、空闲空间违例）时返回空
+    // mask 为空表示只用 roi。未通过验收（内点率、支持率、空闲空间违例、封闭端被观测比例）时返回空
     std::optional<Result> register_depth(
         const cv::Mat& depth, const geometry::Camera& camera, const cv::Rect2i& roi,
         const cv::Mat& mask = {}) const noexcept;

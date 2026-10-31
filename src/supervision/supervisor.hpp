@@ -25,10 +25,11 @@ public:
         // 未被遮挡的像素占有效像素的比例低于该值时，这一帧也无法判断：模型大部分被挡住（例如夹爪从前方经过），
         // 剩下的像素太少，看不出位姿是否偏了。只用像素数时，分辨率高的相机几乎不会触发
         double min_unoccluded_ratio = 0.25;
-        // mesh 两端中较小的画面内面积比例低于该值时，这一帧无法判断。
-        // 轴向位置只能靠两端约束，一端出了画面，跟踪器会沿轴线滑动；
-        // 深度检查只统计画面内的像素，看不出来，遮挡检查有意不看支持率，也拦不住
-        double min_end_in_image_ratio = 0.8;
+        // 封闭端被观测到的像素比例低于该值时，这一帧无法判断。
+        // 能量单元的轴向位置靠封闭端约束：封闭端被遮挡、没有实测深度或出了画面，
+        // 跟踪器都会沿轴线滑动，其余的深度统计看不出来。开口端套在柱子上，正确跟踪时也大多看不到
+        // （正确帧中只观测到约 44%），所以不用它判断
+        double min_closed_end_observed_ratio = 0.8;
         // 相邻两帧的位姿跳变上限，沿用 Benmao 的 8 cm、30°。只看中心和长轴，绕长轴的转角没有意义
         double max_jump_translation = 0.08;
         double max_jump_axis_deg = 30.;
@@ -48,10 +49,12 @@ public:
         std::optional<Eigen::Isometry3d> pose; // 跟踪器的结果 (mesh -> camera)，跟踪失败时为空
         // pose 处的深度检查。ROI 用 DepthCheck::projected_box，不用掩码
         registration::DepthCheck::Quality depth;
-        // 这一帧运行了检测时，mesh 投影框与检测框的 IoU
+        // 与 mesh 投影框重叠的检测框中最大的 IoU（pipeline::target_detection_iou）。
+        // 没有重叠的检测时不给：不重叠的检测属于其他单元，不是当前目标的证据。
+        // 目标被挡住时，检测网络可能只检测到相邻单元
         std::optional<double> detection_iou;
-        // pose 处 mesh 两端中较小的画面内面积比例 (DepthCheck::end_in_image_ratio)，不给则不检查
-        std::optional<double> end_in_image_ratio;
+        // pose 处封闭端被观测到的像素比例 (DepthCheck::end_observed_ratios 的 closed)，不给则不检查
+        std::optional<double> closed_end_observed_ratio;
     };
 
     struct Decision {

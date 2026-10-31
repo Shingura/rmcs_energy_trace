@@ -62,6 +62,17 @@ std::optional<std::size_t> select_target(
     return best;
 }
 
+std::optional<double> target_detection_iou(
+    const detection::Detector::Detections& detections, const cv::Rect2i& projected_box) noexcept {
+    auto best = std::optional<double>{};
+    for (const auto& detection : detections) {
+        const auto value = iou(cv::Rect2f{projected_box}, detection.box);
+        if (value > 0. && (!best || value > *best))
+            best = value;
+    }
+    return best;
+}
+
 struct Pipeline::Impl {
     Config config;
     bool initialized = false;
@@ -185,14 +196,9 @@ struct Pipeline::Impl {
             diag.projected_box = depth_check.projected_box(config.camera, tracked->pose);
             observation.depth =
                 depth_check.check(depth, config.camera, diag.projected_box, {}, tracked->pose);
-            observation.end_in_image_ratio =
-                depth_check.end_in_image_ratio(config.camera, tracked->pose);
-            // 与投影框 IoU 最大的检测；没有检测时不给
-            for (const auto& detection : diag.detections) {
-                const auto value = iou(cv::Rect2f{diag.projected_box}, detection.box);
-                if (!observation.detection_iou || value > *observation.detection_iou)
-                    observation.detection_iou = value;
-            }
+            observation.closed_end_observed_ratio =
+                depth_check.end_observed_ratios(depth, config.camera, tracked->pose).closed;
+            observation.detection_iou = target_detection_iou(diag.detections, diag.projected_box);
         }
         const auto decision = supervisor.update(observation);
         diag.timing.check_ms = elapsed_ms(begin);

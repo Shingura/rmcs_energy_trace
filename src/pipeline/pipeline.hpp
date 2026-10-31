@@ -100,7 +100,8 @@ public:
         // 跟踪稳定：处于跟踪状态，且包括这一帧在内已经连续 Config::stable_frames 个处理帧可信。
         // 配准通过的那一帧算第 1 个可信帧；不可信的帧和重新初始化都把计数清零。
         // 机械臂控制在 stable 为 true 后才开始运动，此前原地不动，等视觉初始化并稳定；
-        // 运动中监督要求重新初始化（stable 变为 false）时应停下，原地重新初始化
+        // 运动中跟丢（stable 变为 false）不停下，沿参考位姿继续走，同时重新初始化；
+        // 是否停下由参考位姿监视决定（见 reference_monitor.hpp）
         bool stable = false;
         Diagnostics diagnostics;
     };
@@ -125,5 +126,10 @@ public:
 std::optional<std::size_t> select_target(
     const detection::Detector::Detections& detections, cv::Size image, bool require_mask,
     const std::optional<cv::Rect2i>& target_box, double min_iou) noexcept;
+
+// 与投影框重叠的检测中最大的
+// IoU；没有与它重叠的检测时为空：不重叠的检测属于其他单元，不是当前目标的证据
+std::optional<double> target_detection_iou(
+    const detection::Detector::Detections& detections, const cv::Rect2i& projected_box) noexcept;
 
 } // namespace rmcs_energy_trace::pipeline

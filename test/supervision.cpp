@@ -42,7 +42,7 @@ auto good(double x = 0.) -> Supervisor::Observation {
         .pose = make_pose(x),
         .depth = make_depth(0.95, 0.02, 0.03),
         .detection_iou = {},
-        .end_in_image_ratio = {}};
+        .closed_end_observed_ratio = {}};
 }
 
 // mesh 有一半落在背景上
@@ -51,7 +51,7 @@ auto over_background() -> Supervisor::Observation {
         .pose = make_pose(0.),
         .depth = make_depth(0.5, 0.5, 0.),
         .detection_iou = {},
-        .end_in_image_ratio = {}};
+        .closed_end_observed_ratio = {}};
 }
 
 // 几乎全被挡住：未被遮挡的像素只有 50 个
@@ -60,13 +60,13 @@ auto occluded() -> Supervisor::Observation {
         .pose = make_pose(0.),
         .depth = make_depth(0.04, 0.01, 0.95),
         .detection_iou = {},
-        .end_in_image_ratio = {}};
+        .closed_end_observed_ratio = {}};
 }
 
-// 有一端在画面外：深度检查本身看起来很好
+// 封闭端没有被观测到：深度检查本身看起来很好
 auto end_outside(double ratio = 0.5) -> Supervisor::Observation {
     auto observation = good();
-    observation.end_in_image_ratio = ratio;
+    observation.closed_end_observed_ratio = ratio;
     return observation;
 }
 
@@ -217,20 +217,26 @@ TEST(Supervisor, TrackerFailureIsBad) {
     EXPECT_FALSE(decision.trusted);
 }
 
-// 有一端在画面外时无法判断：即使深度检查很好也不可信，也不计入不健康
-TEST(Supervisor, EndOutsideImageIsUnknown) {
+// 封闭端没有被观测到时无法判断：即使深度检查很好也不可信，也不计入不健康
+TEST(Supervisor, ClosedEndNotObservedIsUnknown) {
     auto supervisor = started();
     for (int i = 0; i < 10; i++) {
         const auto decision = supervisor.update(end_outside());
         EXPECT_EQ(decision.health, Health::kUnknown);
         EXPECT_FALSE(decision.trusted);
         EXPECT_FALSE(decision.reinitialize);
-        EXPECT_NE(decision.reason.find("outside"), std::string_view::npos);
+        EXPECT_NE(decision.reason.find("closed end"), std::string_view::npos);
     }
     EXPECT_TRUE(supervisor.update(good()).trusted);
 }
 
-TEST(Supervisor, EndOutsideImageCountsAsNoGoodFrame) {
+TEST(Supervisor, ClosedEndJustBelowThresholdIsUnknown) {
+    auto supervisor = started();
+    EXPECT_EQ(supervisor.update(end_outside(0.79)).health, Health::kUnknown);
+    EXPECT_EQ(supervisor.update(end_outside(0.80)).health, Health::kGood);
+}
+
+TEST(Supervisor, ClosedEndNotObservedCountsAsNoGoodFrame) {
     auto supervisor = Supervisor{Supervisor::Config{.no_good_frames = 3}};
     supervisor.start(make_pose(0.));
     EXPECT_FALSE(supervisor.update(end_outside()).reinitialize);
@@ -238,19 +244,19 @@ TEST(Supervisor, EndOutsideImageCountsAsNoGoodFrame) {
     EXPECT_TRUE(supervisor.update(end_outside()).reinitialize);
 }
 
-// 两端画面内比例正常时不影响原有判断；不给比例时不检查
-TEST(Supervisor, EndInImageRatioDoesNotAffectOtherRules) {
+// 封闭端被观测比例正常（含等于阈值）时不影响原有判断；不给比例时不检查
+TEST(Supervisor, ClosedEndObservedRatioDoesNotAffectOtherRules) {
     auto supervisor = started();
     auto observation = good();
-    observation.end_in_image_ratio = 0.9;
+    observation.closed_end_observed_ratio = 0.9;
     EXPECT_EQ(supervisor.update(observation).health, Health::kGood);
-    observation.end_in_image_ratio = 0.8;
+    observation.closed_end_observed_ratio = 0.8;
     EXPECT_EQ(supervisor.update(observation).health, Health::kGood);
     observation.depth = make_depth(0.5, 0.5, 0.);
     EXPECT_EQ(supervisor.update(observation).health, Health::kBad);
     observation.depth = make_depth(0.04, 0.01, 0.95);
     EXPECT_EQ(supervisor.update(observation).health, Health::kUnknown);
-    // 位姿跳变在画面内比例之前判断
+    // 位姿跳变在封闭端比例之前判断
     observation = end_outside();
     observation.pose = make_pose(0.10);
     EXPECT_EQ(supervisor.update(observation).health, Health::kBad);
@@ -616,6 +622,7 @@ namespace {
 
 using rmcs_energy_trace::detection::Detector;
 using rmcs_energy_trace::pipeline::select_target;
+using rmcs_energy_trace::pipeline::target_detection_iou;
 
 auto make_detection(cv::Rect2f box, bool with_mask = true) -> Detector::Detection {
     return {
@@ -674,4 +681,30 @@ TEST(SelectTarget, BelowMinIouSelectsNothing) {
 TEST(SelectTarget, EmptyTargetBoxSelectsNothing) {
     const auto detections = Detector::Detections{make_detection({280, 200, 80, 80})};
     EXPECT_FALSE(select_target(detections, kImage, false, cv::Rect2i{}, 0.2).has_value());
+}
+
+TEST(TargetDetectionIou, NoDetectionsIsEmpty) {
+    EXPECT_FALSE(target_detection_iou({}, cv::Rect2i{50, 50, 100, 100}).has_value());
+}
+
+TEST(TargetDetectionIou, NonOverlappingDetectionsAreNotEvidence) {
+    // 相邻单元被检测到、目标被挡住的情况：框不重叠，不给 IoU
+    const auto detections = Detector::Detections{
+        make_detection({200, 50, 100, 100}), make_detection({400, 300, 80, 80})};
+    EXPECT_FALSE(target_detection_iou(detections, cv::Rect2i{50, 50, 100, 100}).has_value());
+    // 边相接（交集为空）同样不算重叠
+    EXPECT_FALSE(
+        target_detection_iou({make_detection({150, 50, 100, 100})}, cv::Rect2i{50, 50, 100, 100})
+            .has_value());
+}
+
+TEST(TargetDetectionIou, MaxOverOverlappingDetections) {
+    const auto projected = cv::Rect2i{50, 50, 100, 100};
+    const auto detections = Detector::Detections{
+        make_detection({400, 300, 80, 80}), make_detection({100, 50, 100, 100}),
+        make_detection({55, 50, 100, 100}), make_detection({200, 50, 100, 100})};
+    const auto value = target_detection_iou(detections, projected);
+    ASSERT_TRUE(value.has_value());
+    // 下标 2：交 95x100，并 2*10000-9500
+    EXPECT_NEAR(*value, 9500. / 10500., 1e-9);
 }

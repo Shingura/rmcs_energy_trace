@@ -52,14 +52,20 @@ public:
     cv::Rect2i
         projected_box(const geometry::Camera& camera, const Eigen::Isometry3d& pose) const noexcept;
 
-    // mesh 两端表面按位姿投影后落在画面内的面积比例，取两端中较小的一个，不考虑自遮挡。
-    // mesh 原点在包围盒中心、z 为长轴：重心 |z| 大于半长一半（两端各 1/4 长度）的三角形属于端部，
-    // z > 0 和 z < 0
-    // 各算一端。每个端部按三角形面积加权，重心在相机前方且投影在图像范围内的算画面内。
-    // 能量单元的轴向位置只能靠两端约束，中段沿轴线滑动时深度几乎不变；一端出了画面，
-    // 跟踪器会沿轴线滑动，深度检查又只统计画面内的像素，看不出来
-    double end_in_image_ratio(
-        const geometry::Camera& camera, const Eigen::Isometry3d& pose) const noexcept;
+    // 两端被观测到的像素比例。端部的划分：三角形重心 |z| > 半长 / 2，
+    // +z 为封闭端，-z
+    // 为开口端。分母是该端在完整投影（含画面外部分，轮廓同样向内腐蚀）中的模型像素数；
+    // 分子是其中在画面内、有实测深度、且没有被遮挡（check 中判为支持或空闲空间违例）的像素数。
+    // 不使用掩码。
+    // 轴向位置只能靠端部约束，中段沿轴线滑动时深度几乎不变；端部被挡住、没有深度或出了画面时，
+    // 这个比例会降低，其余的深度统计看不出来。监督和配准只用封闭端：开口端套在柱子上，正确时也大多看不到
+    struct EndObserved {
+        double closed = 0.;
+        double open = 0.;
+    };
+    EndObserved end_observed_ratios(
+        const cv::Mat& depth, const geometry::Camera& camera,
+        const Eigen::Isometry3d& pose) const noexcept;
 
 private:
     geometry::Mesh mesh_;
