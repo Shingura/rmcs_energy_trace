@@ -31,6 +31,37 @@ auto iou(const cv::Rect2f& a, const cv::Rect2f& b) noexcept -> double {
 
 } // namespace
 
+std::optional<std::size_t> select_target(
+    const detection::Detector::Detections& detections, cv::Size image, bool require_mask,
+    const std::optional<cv::Rect2i>& target_box, double min_iou) noexcept {
+    if (target_box && target_box->empty())
+        return std::nullopt;
+    const auto center_x = (image.width - 1) / 2.f;
+    const auto center_y = (image.height - 1) / 2.f;
+    auto best = std::optional<std::size_t>{};
+    auto best_score = 0.;
+    for (std::size_t i = 0; i < detections.size(); i++) {
+        if (require_mask && detections[i].mask.empty())
+            continue;
+        const auto& box = detections[i].box;
+        if (target_box) {
+            const auto value = iou(cv::Rect2f{*target_box}, box);
+            if (value >= min_iou && (!best || value > best_score)) {
+                best_score = value;
+                best = i;
+            }
+        } else {
+            const auto distance =
+                std::hypot(box.x + box.width / 2.f - center_x, box.y + box.height / 2.f - center_y);
+            if (!best || distance < best_score) {
+                best_score = distance;
+                best = i;
+            }
+        }
+    }
+    return best;
+}
+
 struct Pipeline::Impl {
     Config config;
     bool initialized = false;
@@ -84,30 +115,17 @@ struct Pipeline::Impl {
         return {};
     }
 
-    // 取检测框中心离画面中心最近的：操作手对准目标后才启动取矿。
-    // 掩码来源为分割网络时跳过没有掩码的检测
-    std::optional<std::size_t> select(const detection::Detector::Detections& detections) const {
-        const auto center_x = (config.camera.width - 1) / 2.f;
-        const auto center_y = (config.camera.height - 1) / 2.f;
-        auto best = std::optional<std::size_t>{};
-        auto best_distance = 0.f;
-        for (std::size_t i = 0; i < detections.size(); i++) {
-            if (config.mask_source == MaskSource::kNetwork && detections[i].mask.empty())
-                continue;
-            const auto& box = detections[i].box;
-            const auto distance =
-                std::hypot(box.x + box.width / 2.f - center_x, box.y + box.height / 2.f - center_y);
-            if (!best || distance < best_distance) {
-                best_distance = distance;
-                best = i;
-            }
-        }
-        return best;
-    }
-
-    void search(const cv::Mat& bgr, const cv::Mat& depth, Result& result) {
+    void search(
+        const cv::Mat& bgr, const cv::Mat& depth, const std::optional<Eigen::Isometry3d>& target,
+        Result& result) {
         auto& diag = result.diagnostics;
-        diag.selected = select(diag.detections);
+        auto target_box = std::optional<cv::Rect2i>{};
+        if (target)
+            target_box = depth_check.projected_box(config.camera, *target);
+        diag.selected = select_target(
+            diag.detections, {config.camera.width, config.camera.height},
+            config.mask_source == MaskSource::kNetwork, target_box,
+            config.supervisor.min_detection_iou);
         if (!diag.selected)
             return;
         const auto& detection = diag.detections[*diag.selected];
@@ -186,7 +204,8 @@ struct Pipeline::Impl {
             state = State::kSearching;
     }
 
-    std::expected<Result, std::string> process(const cv::Mat& bgr, const cv::Mat& depth) {
+    std::expected<Result, std::string> process(
+        const cv::Mat& bgr, const cv::Mat& depth, const std::optional<Eigen::Isometry3d>& target) {
         if (!initialized)
             return std::unexpected{"Pipeline is not initialized"};
         const auto size = cv::Size{config.camera.width, config.camera.height};
@@ -207,7 +226,7 @@ struct Pipeline::Impl {
         diag.timing.detect_ms = elapsed_ms(detect_begin);
 
         if (state == State::kSearching)
-            search(bgr, depth, result);
+            search(bgr, depth, target, result);
         else
             track(bgr, depth, result);
         trusted_streak = result.trusted ? trusted_streak + 1 : 0;
@@ -224,8 +243,10 @@ std::expected<void, std::string> Pipeline::initialize(const Config& config) noex
 }
 
 std::expected<Pipeline::Result, std::string>
-    Pipeline::process(const cv::Mat& bgr, const cv::Mat& depth) noexcept try {
-    return pimpl_->process(bgr, depth);
+    Pipeline::process(
+        const cv::Mat& bgr, const cv::Mat& depth,
+        const std::optional<Eigen::Isometry3d>& target) noexcept try {
+    return pimpl_->process(bgr, depth, target);
 } catch (const std::exception& e) {
     return std::unexpected{std::string{"Pipeline failed: "} + e.what()};
 }

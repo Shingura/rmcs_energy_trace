@@ -555,3 +555,123 @@ TEST(ReferenceMonitor, ConfigurableThresholds) {
     EXPECT_EQ(feed(monitor, make_base_pose(0.03)).inconsistent_count, 1);
     EXPECT_EQ(feed(monitor, make_base_pose(0.03)).state, Monitor::State::kMoved);
 }
+
+// target() 只在有参考时有值，是最近一次可信帧的底座系位姿
+TEST(ReferenceMonitor, TargetFollowsTrustedFrames) {
+    auto monitor = Monitor{};
+    const auto camera = make_camera();
+    EXPECT_FALSE(monitor.target().has_value());
+
+    // 建立参考前（不稳定、不可信）为空
+    monitor.update(make_result(make_base_pose(0.), camera, true, false), camera);
+    monitor.update(make_result(make_base_pose(0.), camera, false, true), camera);
+    EXPECT_FALSE(monitor.target().has_value());
+
+    // 建立参考的那一帧
+    monitor.update(make_result(make_base_pose(0.), camera, true, true), camera);
+    ASSERT_TRUE(monitor.target().has_value());
+    EXPECT_TRUE(monitor.target()->isApprox(make_base_pose(0.)));
+
+    // 一致和不一致的可信帧都更新
+    feed(monitor, make_base_pose(0.003));
+    EXPECT_TRUE(monitor.target()->isApprox(make_base_pose(0.003)));
+    feed(monitor, make_base_pose(0.02));
+    EXPECT_TRUE(monitor.target()->isApprox(make_base_pose(0.02)));
+
+    // 不可信的帧不改变
+    feed(monitor, make_base_pose(0.3), false);
+    EXPECT_TRUE(monitor.target()->isApprox(make_base_pose(0.02)));
+}
+
+TEST(ReferenceMonitor, TargetFollowsPulledOutUnit) {
+    auto monitor = established();
+    feed(monitor, make_base_pose(0.), true, true);
+    feed(monitor, make_base_pose(0.06), true, true);
+    EXPECT_TRUE(monitor.target()->isApprox(make_base_pose(0.06)));
+    feed(monitor, make_base_pose(0.12), true, true);
+    EXPECT_TRUE(monitor.target()->isApprox(make_base_pose(0.12)));
+    feed(monitor, make_base_pose(0.5), false, true);
+    EXPECT_TRUE(monitor.target()->isApprox(make_base_pose(0.12)));
+}
+
+TEST(ReferenceMonitor, TargetClearedOnMovedAndReset) {
+    auto monitor = established();
+    for (int i = 0; i < 5; i++)
+        feed(monitor, make_base_pose(0.02));
+    ASSERT_EQ(monitor.state(), Monitor::State::kMoved);
+    EXPECT_FALSE(monitor.target().has_value());
+    feed(monitor, make_base_pose(0.));
+    EXPECT_FALSE(monitor.target().has_value());
+
+    monitor.reset();
+    EXPECT_FALSE(monitor.target().has_value());
+
+    monitor = established();
+    ASSERT_TRUE(monitor.target().has_value());
+    monitor.reset();
+    EXPECT_FALSE(monitor.target().has_value());
+}
+
+namespace {
+
+using rmcs_energy_trace::detection::Detector;
+using rmcs_energy_trace::pipeline::select_target;
+
+auto make_detection(cv::Rect2f box, bool with_mask = true) -> Detector::Detection {
+    return {
+        .box = box,
+        .score = 0.9f,
+        .mask = with_mask ? cv::Mat{cv::Size{640, 480}, CV_8UC1, cv::Scalar{0}} : cv::Mat{}};
+}
+
+const auto kImage = cv::Size{640, 480};
+
+} // namespace
+
+TEST(SelectTarget, NearestToImageCenterWithoutTargetBox) {
+    const auto detections = Detector::Detections{
+        make_detection({50, 50, 100, 100}), make_detection({280, 200, 80, 80}),
+        make_detection({450, 300, 100, 100})};
+    EXPECT_EQ(select_target(detections, kImage, false, std::nullopt, 0.2), 1u);
+    EXPECT_FALSE(select_target({}, kImage, false, std::nullopt, 0.2).has_value());
+}
+
+TEST(SelectTarget, RequireMaskSkipsDetectionsWithoutMask) {
+    const auto detections = Detector::Detections{
+        make_detection({280, 200, 80, 80}, false), make_detection({50, 50, 100, 100})};
+    EXPECT_EQ(select_target(detections, kImage, true, std::nullopt, 0.2), 1u);
+    EXPECT_EQ(select_target(detections, kImage, false, std::nullopt, 0.2), 0u);
+    EXPECT_FALSE(
+        select_target({make_detection({280, 200, 80, 80}, false)}, kImage, true, std::nullopt, 0.2)
+            .has_value());
+    // 给出 target_box 时同样跳过
+    EXPECT_FALSE(select_target(
+                     {make_detection({50, 50, 100, 100}, false)}, kImage, true,
+                     cv::Rect2i{50, 50, 100, 100}, 0.2)
+                     .has_value());
+}
+
+TEST(SelectTarget, TargetBoxPicksOverlappingDetection) {
+    // 下标 1 离画面中心更近，但目标投影框与下标 0 重合
+    const auto detections = Detector::Detections{
+        make_detection({50, 50, 100, 100}), make_detection({280, 200, 80, 80})};
+    EXPECT_EQ(select_target(detections, kImage, false, cv::Rect2i{55, 55, 100, 100}, 0.2), 0u);
+    // 多个重叠时取 IoU 最大的
+    const auto overlapping = Detector::Detections{
+        make_detection({50, 50, 100, 100}), make_detection({70, 50, 100, 100})};
+    EXPECT_EQ(select_target(overlapping, kImage, false, cv::Rect2i{72, 50, 100, 100}, 0.2), 1u);
+}
+
+TEST(SelectTarget, BelowMinIouSelectsNothing) {
+    const auto detections = Detector::Detections{make_detection({50, 50, 100, 100})};
+    // 框不相交
+    EXPECT_FALSE(select_target(detections, kImage, false, cv::Rect2i{400, 300, 100, 100}, 0.2));
+    // 相交但 IoU 约 0.005
+    EXPECT_FALSE(select_target(detections, kImage, false, cv::Rect2i{140, 140, 100, 100}, 0.2));
+    EXPECT_EQ(select_target(detections, kImage, false, cv::Rect2i{140, 140, 100, 100}, 0.004), 0u);
+}
+
+TEST(SelectTarget, EmptyTargetBoxSelectsNothing) {
+    const auto detections = Detector::Detections{make_detection({280, 200, 80, 80})};
+    EXPECT_FALSE(select_target(detections, kImage, false, cv::Rect2i{}, 0.2).has_value());
+}

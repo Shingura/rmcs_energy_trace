@@ -22,9 +22,11 @@ namespace rmcs_energy_trace::pipeline {
 
 // 完整的位姿估计流程：检测 -> 掩码 -> 配准 -> 跟踪 -> 监督。
 //
-// 搜索状态：每帧检测，选检测框中心离画面中心最近的一个配准；配准通过后启动 Tracker 和
-// Supervisor，进入跟踪状态。 跟踪状态：Tracker 处理这一帧，同一帧也运行检测；用深度检查和检测框 IoU
-// 交给 Supervisor， 监督要求重新初始化时回到搜索状态。
+// 搜索状态：每帧检测，选一个检测框配准；配准通过后启动 Tracker 和 Supervisor，进入跟踪状态。
+// 不知道目标在哪里时（第一次初始化，操作手已经把准心对准目标）选检测框中心离画面中心最近的；
+// 已知目标位姿时（重新初始化，相机不再对准目标）选与目标投影框 IoU 最大的。
+// 跟踪状态：Tracker 处理这一帧，同一帧也运行检测；用深度检查和检测框 IoU 交给 Supervisor，
+// 监督要求重新初始化时回到搜索状态。
 //
 // 只能在一个线程里调用 initialize 和 process（不要求线程安全）；耗时较长的 process
 // 应放在组件的工作线程里，不要在实时回调中调用
@@ -108,10 +110,20 @@ public:
     std::expected<void, std::string> initialize(const Config& config) noexcept;
 
     // bgr 为 CV_8UC3，depth 为 CV_16UC1，尺寸都等于 Config::camera。
-    // 未初始化、图像格式或尺寸不符时返回错误
-    std::expected<Result, std::string> process(const cv::Mat& bgr, const cv::Mat& depth) noexcept;
+    // 未初始化、图像格式或尺寸不符时返回错误。
+    // target 为相机系下目标的位姿 (mesh -> camera)，只在搜索状态下使用：给出时按目标位置选检测框
+    // （见 select_target），没有选中时这一帧不配准；不给时选离画面中心最近的。跟踪状态不使用
+    std::expected<Result, std::string> process(
+        const cv::Mat& bgr, const cv::Mat& depth,
+        const std::optional<Eigen::Isometry3d>& target = std::nullopt) noexcept;
 
     [[nodiscard]] State state() const noexcept;
 };
+
+// 搜索状态下选目标，返回下标。target_box 为空时选检测框中心离画面中心最近的；
+// 给出时选与它 IoU 最大的，最大 IoU 低于 min_iou 时不选。require_mask 为 true 时跳过没有掩码的检测
+std::optional<std::size_t> select_target(
+    const detection::Detector::Detections& detections, cv::Size image, bool require_mask,
+    const std::optional<cv::Rect2i>& target_box, double min_iou) noexcept;
 
 } // namespace rmcs_energy_trace::pipeline

@@ -19,6 +19,10 @@ namespace rmcs_energy_trace::pipeline {
 // 不可信的帧是弱证据，不参与比较，不计入也不清零不一致计数。
 // 流程内部重新配准后的可信位姿照样参与比较。
 //
+// 另外记录目标最近一次可信的位姿（target()），上层在流程重新初始化时用它按位置选检测框：
+// 机械臂接近、抓取、拉出的过程中相机不再对准目标，离画面中心最近的可能是相邻单元。
+// 用最近一次可信的位姿而不用参考位姿：夹住之后单元随夹爪被拉出，参考位姿处已经没有单元了。
+//
 // 只做判断，不调用其他模块；只用到 Pipeline::Result 的数据，每帧调用一次 update
 class ReferenceMonitor {
 public:
@@ -79,10 +83,17 @@ public:
     // 最近一次 update 的状态（reset 后为 kNoReference）
     [[nodiscard]] State state() const noexcept { return state_; }
 
+    // 有参考时，目标最近一次可信的底座系位姿 (mesh -> base)，不可信的帧不改变它；
+    // 没有参考、判为被移动和 reset 后为空
+    [[nodiscard]] const std::optional<Eigen::Isometry3d>& target() const noexcept {
+        return target_;
+    }
+
 private:
     Config config_;
     State state_ = State::kNoReference;
     std::optional<Eigen::Isometry3d> reference_;
+    std::optional<Eigen::Isometry3d> target_; // 最近一次可信的位姿
     std::optional<Comparison> moved_comparison_; // 判为被移动的那一次比较
     int inconsistent_count_ = 0;
 };

@@ -12,6 +12,7 @@ ReferenceMonitor::ReferenceMonitor(const Config& config) noexcept
 void ReferenceMonitor::reset() noexcept {
     state_ = State::kNoReference;
     reference_.reset();
+    target_.reset();
     moved_comparison_.reset();
     inconsistent_count_ = 0;
 }
@@ -46,6 +47,7 @@ ReferenceMonitor::Output ReferenceMonitor::update(
         if (!result.stable || grasped)
             return {};
         reference_ = pose;
+        target_ = pose;
         inconsistent_count_ = 0;
         state_ = State::kEstablished;
         return {
@@ -56,6 +58,7 @@ ReferenceMonitor::Output ReferenceMonitor::update(
             .displacement = Displacement{}};
     }
 
+    target_ = pose;
     const auto& reference = *reference_;
     const Eigen::Vector3d offset = pose.translation() - reference.translation();
     const auto displacement =
@@ -86,6 +89,7 @@ ReferenceMonitor::Output ReferenceMonitor::update(
         state_ = State::kMoved;
         moved_comparison_ = comparison;
         reference_.reset();
+        target_.reset();
         reference_out.reset();
     }
     return {

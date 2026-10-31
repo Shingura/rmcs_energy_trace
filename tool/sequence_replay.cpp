@@ -697,8 +697,14 @@ auto main(int argc, char* argv[]) -> int {
         const auto noisy = add_depth_noise(depth, sequence->camera, options->depth_noise, frame);
         const auto truth = load_truth(options->sequence_dir, frame);
 
+        // 相机位姿；已知目标位置时，重新初始化按它选检测框
+        const auto camera = load_camera_pose(options->sequence_dir, frame);
+        auto target = std::optional<Eigen::Isometry3d>{};
+        if (camera && monitor.target())
+            target = camera->inverse() * *monitor.target();
+
         const auto begin = Clock::now();
-        const auto processed = pipeline.process(color, noisy);
+        const auto processed = pipeline.process(color, noisy, target);
         const auto seconds = std::chrono::duration<double>{Clock::now() - begin}.count();
         if (!processed) {
             std::println(stderr, "Frame {}: {}", frame, processed.error());
@@ -736,7 +742,7 @@ auto main(int argc, char* argv[]) -> int {
         }
 
         // 参考位姿监视：以世界系作底座系，meta 里的相机位姿就是相机到底座
-        if (const auto camera = load_camera_pose(options->sequence_dir, frame)) {
+        if (camera) {
             row.attached = load_attached(options->sequence_dir, frame);
             const auto output = monitor.update(result, *camera, row.attached);
             using MonitorState = ReferenceMonitor::State;
